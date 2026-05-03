@@ -13,9 +13,9 @@ import (
 
 	htmltomd "github.com/JohannesKaufmann/html-to-markdown/v2"
 	readability "github.com/go-shiori/go-readability"
-)
 
-const userAgentVersion = "0.1"
+	"github.com/mritunjaysharma394/llmwiki/internal/version"
+)
 
 // URLOptions tunes the URL fetcher used by FetchURLFiles.
 //
@@ -35,7 +35,7 @@ func DefaultURLOptions() URLOptions {
 	return URLOptions{
 		Timeout:      30 * time.Second,
 		MaxBodyBytes: 5 * 1024 * 1024,
-		UserAgent:    "llmwiki/" + userAgentVersion,
+		UserAgent:    "llmwiki/" + version.Version,
 	}
 }
 
@@ -58,7 +58,7 @@ func FetchURLFiles(rawURL string, opts URLOptions) ([]SourceFile, error) {
 		opts.MaxBodyBytes = 5 * 1024 * 1024
 	}
 	if opts.UserAgent == "" {
-		opts.UserAgent = "llmwiki/" + userAgentVersion
+		opts.UserAgent = "llmwiki/" + version.Version
 	}
 	client := opts.HTTPClient
 	if client == nil {

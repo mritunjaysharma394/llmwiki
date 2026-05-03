@@ -5,7 +5,30 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/mritunjaysharma394/llmwiki/internal/version"
 )
+
+func TestFetchURLUsesVersionedUserAgent(t *testing.T) {
+	saved := version.Version
+	defer func() { version.Version = saved }()
+	version.Version = "9.9.9-test"
+
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("User-Agent")
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	if _, err := FetchURLFiles(srv.URL, DefaultURLOptions()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "llmwiki/9.9.9-test") {
+		t.Errorf("User-Agent = %q, want substring llmwiki/9.9.9-test", got)
+	}
+}
 
 func TestFetchURLHTML(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
