@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/mritunjaysharma394/llmwiki/internal/cliutil"
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
 	"github.com/mritunjaysharma394/llmwiki/internal/wiki"
@@ -222,6 +223,16 @@ func runIngest(cmd *cobra.Command, args []string) error {
 		sourceFiles, err = ingest.ReadLocalFiles(source, walkOpts)
 	}
 	if err != nil {
+		if strings.Contains(err.Error(), "HTTP ") {
+			return cliutil.Wrap("ingest failed",
+				err,
+				"check the URL is reachable in a browser; for transient 5xx errors retry the command")
+		}
+		if strings.Contains(err.Error(), "no extractable text") {
+			return cliutil.Wrap("PDF appears to be scanned",
+				err,
+				"this PDF has no text layer; OCR is not supported in v1.0")
+		}
 		return fmt.Errorf("reading source: %w", err)
 	}
 	if len(sourceFiles) == 0 {

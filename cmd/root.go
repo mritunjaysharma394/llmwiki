@@ -122,7 +122,9 @@ func loadConfig() error {
 	var err error
 	database, err = db.Open(cfg.Wiki.DBPath)
 	if err != nil {
-		return fmt.Errorf("opening database: %w", err)
+		return cliutil.Wrap("opening database",
+			err,
+			"if the schema is newer than this binary, downgrade is not supported; back up .llmwiki/wiki.db and re-init")
 	}
 	switch cfg.LLM.Provider {
 	case "anthropic", "":
@@ -181,6 +183,11 @@ func applyIngestDefaults(c *IngestConfig) {
 }
 
 func init() {
+	// Cobra prints errors and usage by default when RunE returns non-nil; we
+	// render UserError ourselves in Execute() via cliutil, so silence cobra to
+	// avoid the duplicate one-liner above the polished 3-line block.
+	rootCmd.SilenceErrors = true
+	rootCmd.SilenceUsage = true
 	rootCmd.SetVersionTemplate("{{.Version}}\n")
 	rootCmd.PersistentFlags().StringVar(&overrideProvider, "provider", "", "override LLM provider (anthropic|ollama)")
 	rootCmd.PersistentFlags().StringVar(&overrideModel, "model", "", "override LLM model")
