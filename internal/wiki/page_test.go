@@ -87,3 +87,56 @@ func TestWritePageCreatesDir(t *testing.T) {
 		t.Errorf("file not created: %v", err)
 	}
 }
+
+func TestEvidenceQuoteEscapingAdversarial(t *testing.T) {
+	cases := []Evidence{
+		{Quote: `literal backslash-n: \n`, LineStart: 1, LineEnd: 1},
+		{Quote: `literal backslash-r: \r`, LineStart: 2, LineEnd: 2},
+		{Quote: `literal backslash-quote: \"`, LineStart: 3, LineEnd: 3},
+		{Quote: `single backslash: \`, LineStart: 4, LineEnd: 4},
+		{Quote: `windows path C:\Users\foo`, LineStart: 5, LineEnd: 5},
+		{Quote: `mixed "real quote" plus \\ plus \n literal`, LineStart: 6, LineEnd: 6},
+		{Quote: "actual newline in middle\nsplits across\nthree lines", LineStart: 7, LineEnd: 9},
+		{Quote: `embedded "double" quote`, LineStart: 10, LineEnd: 10},
+	}
+	dir := t.TempDir()
+	original := Page{Title: "Adv", Body: "x", UpdatedAt: time.Now(), Evidence: cases}
+	if err := WritePage(original, dir); err != nil {
+		t.Fatalf("WritePage: %v", err)
+	}
+	read, err := ReadPage(filepath.Join(dir, "Adv.md"))
+	if err != nil {
+		t.Fatalf("ReadPage: %v", err)
+	}
+	if len(read.Evidence) != len(cases) {
+		t.Fatalf("got %d evidence rows, want %d", len(read.Evidence), len(cases))
+	}
+	for i, want := range cases {
+		if read.Evidence[i].Quote != want.Quote {
+			t.Errorf("case %d quote mismatch:\n  got:  %q\n  want: %q", i, read.Evidence[i].Quote, want.Quote)
+		}
+	}
+}
+
+func TestUnescapeQuoteUnit(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{`""`, ""},
+		{`"abc"`, "abc"},
+		{`"a\nb"`, "a\nb"},
+		{`"a\\nb"`, `a\nb`},      // literal \n stays literal
+		{`"a\\\\nb"`, `a\\nb`},   // 4 backslashes → 2 backslashes + n
+		{`"a\""`, `a"`},
+		{`"a\\\"b"`, `a\"b`},     // backslash + escaped-quote
+		{`"\r\n"`, "\r\n"},
+		{`"\\r\\n"`, `\r\n`},
+		{`"trailing slash \"`, `trailing slash \`},
+	}
+	for _, tc := range cases {
+		got := unescapeQuote(tc.in)
+		if got != tc.want {
+			t.Errorf("unescapeQuote(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
