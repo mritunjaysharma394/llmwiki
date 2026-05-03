@@ -139,6 +139,10 @@ func loadConfig() error {
 	default:
 		return fmt.Errorf("unknown provider %q", cfg.LLM.Provider)
 	}
+	if name := os.Getenv("LLMWIKI_CASSETTE"); name != "" {
+		dir := "internal/llm/testdata/cassettes"
+		llmClient = llm.NewCassetteClient(llmClient, dir, name, llm.ModeReplay)
+	}
 	return nil
 }
 
