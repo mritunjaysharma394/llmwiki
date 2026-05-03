@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/mritunjaysharma394/llmwiki/internal/cliutil"
 	"github.com/spf13/cobra"
 )
 
@@ -94,10 +95,11 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	if provider == "anthropic" {
 		if os.Getenv("ANTHROPIC_API_KEY") == "" {
-			return fmt.Errorf(`ANTHROPIC_API_KEY is not set.
-  Get a key at https://console.anthropic.com/settings/keys
-  Then: export ANTHROPIC_API_KEY=sk-ant-...
-  Or use Ollama instead: llmwiki init --provider ollama`)
+			return cliutil.Wrap(
+				"ANTHROPIC_API_KEY is not set",
+				nil,
+				"export ANTHROPIC_API_KEY=sk-ant-... (get one at https://console.anthropic.com/settings/keys), or use --provider ollama",
+			)
 		}
 	}
 	return nil

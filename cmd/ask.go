@@ -10,6 +10,7 @@ import (
 
 	"github.com/charmbracelet/glamour"
 	"github.com/mattn/go-isatty"
+	"github.com/mritunjaysharma394/llmwiki/internal/cliutil"
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/wiki"
 	"github.com/spf13/cobra"
@@ -74,8 +75,11 @@ func runAsk(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("loading pages: %w", err)
 		}
 		if len(all) == 0 {
-			fmt.Println("No pages in wiki yet. Run `llmwiki ingest <source>` first.")
-			return nil
+			return cliutil.Wrap(
+				"no pages in wiki",
+				nil,
+				"run 'llmwiki ingest <source>' to add content first",
+			)
 		}
 		if len(all) > 5 {
 			all = all[:5]

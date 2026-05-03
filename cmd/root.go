@@ -121,10 +121,11 @@ func loadConfig() error {
 	switch cfg.LLM.Provider {
 	case "anthropic", "":
 		if os.Getenv("ANTHROPIC_API_KEY") == "" {
-			return fmt.Errorf(`ANTHROPIC_API_KEY is not set.
-  Get a key at https://console.anthropic.com/settings/keys
-  Then: export ANTHROPIC_API_KEY=sk-ant-...
-  Or use Ollama: llmwiki --provider ollama <command>`)
+			return cliutil.Wrap(
+				"ANTHROPIC_API_KEY is not set",
+				nil,
+				"export ANTHROPIC_API_KEY=sk-ant-... (get one at https://console.anthropic.com/settings/keys), or use --provider ollama",
+			)
 		}
 		llmClient = llm.NewAnthropicClient(cfg.LLM.Model)
 	case "ollama":
