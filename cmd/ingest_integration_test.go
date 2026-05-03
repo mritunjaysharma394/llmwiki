@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,5 +136,161 @@ func TestAskNoHits(t *testing.T) {
 	}
 	if answer == "" {
 		t.Error("empty answer")
+	}
+}
+
+// buildSimplePDF constructs a minimal valid 2-page text PDF byte stream. It
+// mirrors the helper in internal/ingest/pdf_test.go (which is unexported) so
+// this test can build a fixture in t.TempDir() without depending on a checked
+// in binary or a recording step.
+func buildSimplePDF(page1Text, page2Text string) []byte {
+	mkContent := func(text string) string {
+		var sb strings.Builder
+		sb.WriteString("BT\n/F1 18 Tf\n72 720 Td\n")
+		lines := strings.Split(text, "\n")
+		for i, ln := range lines {
+			if i > 0 {
+				sb.WriteString("0 -22 Td\n")
+			}
+			esc := strings.NewReplacer(`\`, `\\`, `(`, `\(`, `)`, `\)`).Replace(ln)
+			fmt.Fprintf(&sb, "(%s) Tj\n", esc)
+		}
+		sb.WriteString("ET\n")
+		return sb.String()
+	}
+	c1 := mkContent(page1Text)
+	c2 := mkContent(page2Text)
+	objs := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 7 0 R >> >> >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(c1), c1),
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 6 0 R /Resources << /Font << /F1 7 0 R >> >> >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(c2), c2),
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+	}
+	var buf bytes.Buffer
+	buf.WriteString("%PDF-1.4\n")
+	buf.WriteString("%\xe2\xe3\xcf\xd3\n")
+	offsets := make([]int, len(objs)+1)
+	for i, body := range objs {
+		offsets[i+1] = buf.Len()
+		fmt.Fprintf(&buf, "%d 0 obj\n%s\nendobj\n", i+1, body)
+	}
+	xrefStart := buf.Len()
+	fmt.Fprintf(&buf, "xref\n0 %d\n", len(objs)+1)
+	buf.WriteString("0000000000 65535 f \n")
+	for i := 1; i <= len(objs); i++ {
+		fmt.Fprintf(&buf, "%010d 00000 n \n", offsets[i])
+	}
+	fmt.Fprintf(&buf, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objs)+1, xrefStart)
+	return buf.Bytes()
+}
+
+func TestIngestPDF(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping cassette PDF test in -short mode")
+	}
+	page1 := "alpha beta gamma delta epsilon zeta eta theta iota kappa"
+	page2 := "lambda mu nu xi omicron pi rho sigma tau upsilon phi chi"
+	pdfPath := filepath.Join(t.TempDir(), "simple.pdf")
+	if err := os.WriteFile(pdfPath, buildSimplePDF(page1, page2), 0o644); err != nil {
+		t.Fatalf("write simple pdf: %v", err)
+	}
+
+	files, err := ingest.ReadPDF(pdfPath)
+	if err != nil {
+		t.Fatalf("ReadPDF: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("ReadPDF returned no pages")
+	}
+	for _, f := range files {
+		if !strings.HasPrefix(f.RelativePath, "page-") {
+			t.Errorf("SourceFile RelativePath %q does not look like page-N", f.RelativePath)
+		}
+	}
+
+	// Cassette gate — skips cleanly when no fixture is present.
+	client := integrationClient(t, "ingest_pdf")
+
+	pages, err := wiki.IngestSourceFilesToPages(context.Background(), client, files, nil)
+	if err != nil {
+		t.Fatalf("IngestSourceFilesToPages: %v", err)
+	}
+	if len(pages) == 0 {
+		t.Fatal("got 0 pages")
+	}
+	byPath := map[string]ingest.SourceFile{}
+	for _, f := range files {
+		byPath[f.RelativePath] = f
+	}
+	for _, p := range pages {
+		if len(p.Evidence) == 0 {
+			t.Errorf("page %q has no evidence", p.Title)
+		}
+		for _, e := range p.Evidence {
+			if !strings.HasPrefix(e.SourceFilePath, "page-") {
+				t.Errorf("page %q evidence source_file %q does not look like page-N", p.Title, e.SourceFilePath)
+			}
+			f, ok := byPath[e.SourceFilePath]
+			if !ok {
+				t.Errorf("page %q evidence source_file %q not in returned files", p.Title, e.SourceFilePath)
+				continue
+			}
+			if !strings.Contains(f.Content, e.Quote) {
+				t.Errorf("page %q evidence quote not in %s: %q", p.Title, e.SourceFilePath, e.Quote)
+			}
+		}
+	}
+}
+
+func TestIngestRepo(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping cassette repo test in -short mode")
+	}
+	fixture := filepath.Join("..", "internal", "ingest", "testdata", "dirs", "minirepo")
+
+	files, err := ingest.ReadLocalFiles(fixture, ingest.DefaultWalkOptions())
+	if err != nil {
+		t.Fatalf("ReadLocalFiles: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("ReadLocalFiles returned no files")
+	}
+	// Walker must drop node_modules.
+	for _, f := range files {
+		if strings.Contains(f.RelativePath, "node_modules") {
+			t.Errorf("node_modules leaked into walker output: %s", f.RelativePath)
+		}
+	}
+
+	// Cassette gate — skips cleanly when no fixture is present.
+	client := integrationClient(t, "ingest_repo")
+
+	pages, err := wiki.IngestSourceFilesToPages(context.Background(), client, files, nil)
+	if err != nil {
+		t.Fatalf("IngestSourceFilesToPages: %v", err)
+	}
+	if len(pages) == 0 {
+		t.Fatal("got 0 pages")
+	}
+	knownPaths := map[string]bool{}
+	for _, f := range files {
+		knownPaths[f.RelativePath] = true
+	}
+	for _, p := range pages {
+		if len(p.Evidence) == 0 {
+			t.Errorf("page %q has no evidence", p.Title)
+		}
+		for _, e := range p.Evidence {
+			if e.SourceFilePath == "" {
+				t.Errorf("page %q has evidence without SourceFilePath", p.Title)
+				continue
+			}
+			if !knownPaths[e.SourceFilePath] {
+				t.Errorf("page %q evidence source_file %q not among walked files", p.Title, e.SourceFilePath)
+			}
+		}
 	}
 }
