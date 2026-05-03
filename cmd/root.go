@@ -3,9 +3,11 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 	"github.com/fatih/color"
+	"github.com/mritunjaysharma394/llmwiki/internal/cliutil"
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
 	"github.com/mritunjaysharma394/llmwiki/internal/version"
@@ -84,8 +86,14 @@ var rootCmd = &cobra.Command{
 
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
-		color.New(color.FgRed, color.Bold).Fprint(os.Stderr, "Error: ")
-		fmt.Fprintln(os.Stderr, err)
+		out := cliutil.Render(err)
+		if out != "" {
+			color.New(color.FgRed, color.Bold).Fprint(os.Stderr, "Error:")
+			// cliutil.Render already starts with "Error:"; trim our colored prefix
+			// and print the rest. Rendered already includes the cause/try lines.
+			rest := strings.TrimPrefix(out, "Error:")
+			fmt.Fprintln(os.Stderr, rest)
+		}
 		os.Exit(1)
 	}
 }

@@ -1,12 +1,48 @@
 package cmd
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/BurntSushi/toml"
+	"github.com/mritunjaysharma394/llmwiki/internal/cliutil"
+	"github.com/spf13/cobra"
 )
+
+func TestExecuteRendersUserError(t *testing.T) {
+	// Inject a fake command that always returns a UserError.
+	probe := &cobra.Command{
+		Use: "probe-fail",
+		// Override the inherited persistent prerun so loadConfig isn't invoked
+		// in the test environment (no .llmwiki/config.toml).
+		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
+		RunE: func(*cobra.Command, []string) error {
+			return cliutil.Wrap("ingest failed", errors.New("HTTP 503"), "check URL")
+		},
+	}
+	rootCmd.AddCommand(probe)
+	defer rootCmd.RemoveCommand(probe)
+
+	var buf bytes.Buffer
+	rootCmd.SetErr(&buf)
+	rootCmd.SetOut(&buf)
+	rootCmd.SetArgs([]string{"probe-fail"})
+
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	out := cliutil.Render(err)
+	for _, want := range []string{"Error: ingest failed", "cause: HTTP 503", "try:   check URL"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Render() missing %q in:\n%s", want, out)
+		}
+	}
+}
 
 // TestApplyIngestDefaultsFillsZeroValues verifies that a zero-valued
 // IngestConfig (the shape pre-v3 configs decode into when [ingest] is absent)
