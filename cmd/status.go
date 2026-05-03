@@ -2,29 +2,28 @@ package cmd
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/spf13/cobra"
 )
 
 var statusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Show wiki statistics",
+	Short: "Print wiki statistics",
 	RunE:  runStatus,
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
 	stats, err := database.GetStats()
 	if err != nil {
-		return fmt.Errorf("getting stats: %w", err)
+		return fmt.Errorf("get stats: %w", err)
 	}
-
-	fmt.Printf("Pages:   %d\n", stats.TotalPages)
-	fmt.Printf("Sources: %d\n", stats.TotalSources)
+	fmt.Printf("pages:           %d\n", stats.TotalPages)
+	fmt.Printf("sources:         %d\n", stats.TotalSources)
+	fmt.Printf("evidence quotes: %d\n", stats.EvidenceQuotes)
+	fmt.Printf("legacy pages:    %d  (run 'llmwiki ingest' on the original sources to upgrade)\n", stats.LegacyPages)
+	fmt.Printf("saved answers:   %d\n", stats.SavedAnswers)
 	if !stats.LastIngest.IsZero() {
-		fmt.Printf("Last ingest: %s\n", stats.LastIngest.Format(time.RFC1123))
-	} else {
-		fmt.Printf("Last ingest: never\n")
+		fmt.Printf("last ingest:     %s\n", stats.LastIngest.Format("2006-01-02 15:04:05 MST"))
 	}
 	return nil
 }

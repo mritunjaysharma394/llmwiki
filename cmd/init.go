@@ -3,50 +3,82 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
-	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/spf13/cobra"
 )
 
-const defaultConfig = `[llm]
+const defaultConfigToml = `[llm]
 provider = "anthropic"
-model    = "claude-opus-4-7"
+model = "claude-haiku-4-5"
 ollama_url = "http://localhost:11434"
 
 [wiki]
 wiki_dir = ".llmwiki/wiki"
 raw_dir  = ".llmwiki/raw"
 db_path  = ".llmwiki/wiki.db"
+
+[ask]
+auto_save = true
+`
+
+const defaultConfigOllamaToml = `[llm]
+provider = "ollama"
+model = "llama3.2"
+ollama_url = "http://localhost:11434"
+
+[wiki]
+wiki_dir = ".llmwiki/wiki"
+raw_dir  = ".llmwiki/raw"
+db_path  = ".llmwiki/wiki.db"
+
+[ask]
+auto_save = true
 `
 
 var initCmd = &cobra.Command{
 	Use:   "init",
-	Short: "Initialize a new llmwiki in the current directory",
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		return nil // override parent — no config needed for init
-	},
-	RunE: func(cmd *cobra.Command, args []string) error {
-		dirs := []string{".llmwiki", ".llmwiki/wiki", ".llmwiki/raw"}
-		for _, d := range dirs {
-			if err := os.MkdirAll(d, 0755); err != nil {
-				return fmt.Errorf("creating %s: %w", d, err)
-			}
+	Short: "Initialize a new wiki in the current directory",
+	RunE:  runInit,
+}
+
+func init() {
+	initCmd.Flags().String("provider", "anthropic", "default LLM provider: anthropic or ollama")
+}
+
+func runInit(cmd *cobra.Command, args []string) error {
+	provider, _ := cmd.Flags().GetString("provider")
+
+	dir := ".llmwiki"
+	for _, sub := range []string{"", "wiki", "raw", "answers"} {
+		p := filepath.Join(dir, sub)
+		if err := os.MkdirAll(p, 0755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", p, err)
 		}
-		configPath := ".llmwiki/config.toml"
-		if _, err := os.Stat(configPath); err == nil {
-			fmt.Println("llmwiki already initialized.")
-			return nil
+	}
+
+	cfgPath := filepath.Join(dir, "config.toml")
+	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+		var content string
+		switch provider {
+		case "ollama":
+			content = defaultConfigOllamaToml
+		default:
+			content = defaultConfigToml
 		}
-		if err := os.WriteFile(configPath, []byte(defaultConfig), 0644); err != nil {
+		if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
 			return fmt.Errorf("writing config: %w", err)
 		}
-		d, err := db.Open(".llmwiki/wiki.db")
-		if err != nil {
-			return fmt.Errorf("initializing database: %w", err)
+	}
+	fmt.Printf("Initialized wiki at %s\n", dir)
+
+	if provider == "anthropic" {
+		if os.Getenv("ANTHROPIC_API_KEY") == "" {
+			return fmt.Errorf(`ANTHROPIC_API_KEY is not set.
+  Get a key at https://console.anthropic.com/settings/keys
+  Then: export ANTHROPIC_API_KEY=sk-ant-...
+  Or use Ollama instead: llmwiki init --provider ollama`)
 		}
-		d.Close()
-		fmt.Println("Initialized llmwiki in .llmwiki/")
-		fmt.Println("Edit .llmwiki/config.toml to configure your LLM provider and model.")
-		return nil
-	},
+	}
+	return nil
 }
