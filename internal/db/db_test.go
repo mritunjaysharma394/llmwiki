@@ -78,3 +78,95 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 		t.Errorf("user_version after upgrade = %d, want 1", version)
 	}
 }
+
+func mustOpenForCascadeTest(t *testing.T) *DB {
+	t.Helper()
+	d, err := Open(filepath.Join(t.TempDir(), "wiki.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	// Force a stress-test by clearing the pool so subsequent calls open new conns.
+	d.sql.SetMaxIdleConns(0)
+	return d
+}
+
+func mustExec(t *testing.T, d *DB, q string, args ...any) {
+	t.Helper()
+	if _, err := d.sql.Exec(q, args...); err != nil {
+		t.Fatalf("exec %q: %v", q, err)
+	}
+}
+
+func mustInsert(t *testing.T, d *DB, q string, args ...any) int64 {
+	t.Helper()
+	var id int64
+	if err := d.sql.QueryRow(q, args...).Scan(&id); err != nil {
+		t.Fatalf("insert %q: %v", q, err)
+	}
+	return id
+}
+
+func TestEvidenceCascadesOnPageDelete(t *testing.T) {
+	d := mustOpenForCascadeTest(t)
+	srcID := mustInsert(t, d, `INSERT INTO sources (uri, content_hash) VALUES ('u', 'h') RETURNING id`)
+	pageID := mustInsert(t, d, `INSERT INTO pages (title, body, content_hash) VALUES ('P', 'b', 'h') RETURNING id`)
+	mustExec(t, d, `INSERT INTO evidence (page_id, source_id, quote) VALUES (?, ?, 'q')`, pageID, srcID)
+
+	mustExec(t, d, `DELETE FROM pages WHERE id = ?`, pageID)
+	var count int
+	d.sql.QueryRow(`SELECT COUNT(*) FROM evidence WHERE page_id = ?`, pageID).Scan(&count)
+	if count != 0 {
+		t.Errorf("evidence not cascade-deleted on page delete: got %d rows, want 0", count)
+	}
+}
+
+func TestEvidenceCascadesOnSourceDelete(t *testing.T) {
+	d := mustOpenForCascadeTest(t)
+	srcID := mustInsert(t, d, `INSERT INTO sources (uri, content_hash) VALUES ('u2', 'h') RETURNING id`)
+	pageID := mustInsert(t, d, `INSERT INTO pages (title, body, content_hash) VALUES ('P2', 'b', 'h') RETURNING id`)
+	mustExec(t, d, `INSERT INTO evidence (page_id, source_id, quote) VALUES (?, ?, 'q')`, pageID, srcID)
+
+	mustExec(t, d, `DELETE FROM sources WHERE id = ?`, srcID)
+	var count int
+	d.sql.QueryRow(`SELECT COUNT(*) FROM evidence WHERE source_id = ?`, srcID).Scan(&count)
+	if count != 0 {
+		t.Errorf("evidence not cascade-deleted on source delete: got %d rows, want 0", count)
+	}
+}
+
+func TestEvidenceFTSTriggers(t *testing.T) {
+	d := mustOpenForCascadeTest(t)
+	srcID := mustInsert(t, d, `INSERT INTO sources (uri, content_hash) VALUES ('u', 'h') RETURNING id`)
+	pageID := mustInsert(t, d, `INSERT INTO pages (title, body, content_hash) VALUES ('P', 'b', 'h') RETURNING id`)
+	evID := mustInsert(t, d, `INSERT INTO evidence (page_id, source_id, quote) VALUES (?, ?, 'kafka consumer group') RETURNING id`, pageID, srcID)
+
+	// Insert trigger fired?
+	var rowid int64
+	if err := d.sql.QueryRow(`SELECT rowid FROM evidence_fts WHERE evidence_fts MATCH 'kafka'`).Scan(&rowid); err != nil {
+		t.Fatalf("FTS match after insert: %v", err)
+	}
+	if rowid != evID {
+		t.Errorf("rowid = %d, want %d", rowid, evID)
+	}
+
+	// Delete trigger fired?
+	mustExec(t, d, `DELETE FROM evidence WHERE id = ?`, evID)
+	var count int
+	d.sql.QueryRow(`SELECT COUNT(*) FROM evidence_fts WHERE evidence_fts MATCH 'kafka'`).Scan(&count)
+	if count != 0 {
+		t.Errorf("FTS row not removed after delete: got %d", count)
+	}
+}
+
+func TestSavedAnswersFTSTrigger(t *testing.T) {
+	d := mustOpenForCascadeTest(t)
+	id := mustInsert(t, d, `INSERT INTO saved_answers (question, answer, file_path) VALUES ('what is X', 'X is Y', 'p.md') RETURNING id`)
+	var got int64
+	if err := d.sql.QueryRow(`SELECT rowid FROM saved_answers_fts WHERE saved_answers_fts MATCH 'what'`).Scan(&got); err != nil {
+		t.Fatalf("FTS match: %v", err)
+	}
+	if got != id {
+		t.Errorf("rowid = %d, want %d", got, id)
+	}
+}

@@ -12,7 +12,8 @@ type DB struct {
 }
 
 func Open(path string) (*DB, error) {
-	sqlDB, err := sql.Open("sqlite", path)
+	dsn := path + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
+	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite: %w", err)
 	}
@@ -115,15 +116,5 @@ func (d *DB) migrate() error {
 		}
 	}
 
-	if _, err := d.sql.Exec(`PRAGMA foreign_keys = ON`); err != nil {
-		return fmt.Errorf("enable foreign_keys: %w", err)
-	}
 	return nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
