@@ -27,6 +27,50 @@ var ingestCmd = &cobra.Command{
 	RunE:  runIngest,
 }
 
+func init() {
+	ingestCmd.Flags().Int64("max-file-bytes", 0, "per-file size limit (0 uses ingest defaults)")
+	ingestCmd.Flags().String("include", "", "comma-separated allowlist of extensions (e.g. .md,.go)")
+	ingestCmd.Flags().String("exclude", "", "comma-separated extra skip globs (e.g. *.foo,vendor/*)")
+	ingestCmd.Flags().Bool("no-gitignore", false, "ignore .gitignore for this run")
+	ingestCmd.Flags().Bool("force", false, "ignore per-file unchanged check; re-ingest everything")
+}
+
+// buildIngestOptions resolves the runtime walker / URL fetcher options for
+// `ingest`. Defaults come from the ingest package; explicit CLI flags
+// override the defaults. Phase H (Task 13) will weave a [ingest] config block
+// in between defaults and flags; for now flags override defaults directly.
+func buildIngestOptions(cmd *cobra.Command) (ingest.WalkOptions, ingest.URLOptions) {
+	walk := ingest.DefaultWalkOptions()
+	urlOpts := ingest.DefaultURLOptions()
+
+	if v, _ := cmd.Flags().GetInt64("max-file-bytes"); v > 0 {
+		walk.MaxFileBytes = v
+	}
+	if v, _ := cmd.Flags().GetString("include"); v != "" {
+		walk.IncludeOnly = splitCSV(v)
+	}
+	if v, _ := cmd.Flags().GetString("exclude"); v != "" {
+		walk.ExtraSkipGlobs = append(walk.ExtraSkipGlobs, splitCSV(v)...)
+	}
+	if v, _ := cmd.Flags().GetBool("no-gitignore"); v {
+		walk.RespectGitignore = false
+	}
+	return walk, urlOpts
+}
+
+// splitCSV trims and drops empty entries from a comma-separated string.
+func splitCSV(s string) []string {
+	parts := strings.Split(s, ",")
+	out := parts[:0]
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // filePartition splits an incoming []ingest.SourceFile against the existing
 // db.SourceFile rows for a source, classifying each by what the dedup pass
 // should do with it.
@@ -99,8 +143,7 @@ func runIngest(cmd *cobra.Command, args []string) error {
 	source := args[0]
 	ctx := cmd.Context()
 
-	walkOpts := ingest.DefaultWalkOptions()
-	urlOpts := ingest.DefaultURLOptions()
+	walkOpts, urlOpts := buildIngestOptions(cmd)
 
 	var sourceFiles []ingest.SourceFile
 	var err error

@@ -87,6 +87,71 @@ func TestComputeWholeHashChangesWithContent(t *testing.T) {
 	}
 }
 
+func TestBuildIngestOptionsAppliesFlags(t *testing.T) {
+	// Use a fresh cobra.Command so flag state from ingestCmd's package init
+	// doesn't bleed across tests (cobra Flags() are per-command and parse-once
+	// safe, but isolating mirrors how runIngest uses them).
+	cmd := ingestCmd
+	if err := cmd.ParseFlags([]string{
+		"--max-file-bytes", "1024",
+		"--exclude", "*.foo,*.bar",
+		"--no-gitignore",
+		"--include", ".md,.go",
+		"--force",
+	}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	t.Cleanup(func() {
+		// Reset flags so other tests see defaults.
+		cmd.Flags().Set("max-file-bytes", "0")
+		cmd.Flags().Set("exclude", "")
+		cmd.Flags().Set("include", "")
+		cmd.Flags().Set("no-gitignore", "false")
+		cmd.Flags().Set("force", "false")
+	})
+
+	walk, _ := buildIngestOptions(cmd)
+	if walk.MaxFileBytes != 1024 {
+		t.Errorf("MaxFileBytes = %d", walk.MaxFileBytes)
+	}
+	if walk.RespectGitignore {
+		t.Error("--no-gitignore should disable RespectGitignore")
+	}
+	if len(walk.ExtraSkipGlobs) != 2 || walk.ExtraSkipGlobs[0] != "*.foo" || walk.ExtraSkipGlobs[1] != "*.bar" {
+		t.Errorf("ExtraSkipGlobs = %v", walk.ExtraSkipGlobs)
+	}
+	if len(walk.IncludeOnly) != 2 || walk.IncludeOnly[0] != ".md" || walk.IncludeOnly[1] != ".go" {
+		t.Errorf("IncludeOnly = %v", walk.IncludeOnly)
+	}
+	if !forceFlag(cmd) {
+		t.Error("--force not propagated")
+	}
+}
+
+func TestSplitCSV(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"", []string{}},
+		{"a", []string{"a"}},
+		{"a,b,c", []string{"a", "b", "c"}},
+		{"  a , b ,, c ", []string{"a", "b", "c"}},
+	}
+	for _, tc := range cases {
+		got := splitCSV(tc.in)
+		if len(got) != len(tc.want) {
+			t.Errorf("splitCSV(%q) = %v want %v", tc.in, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("splitCSV(%q)[%d] = %q want %q", tc.in, i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
 // sanity assertion: paths in `gone` are returned in arbitrary order; tests
 // shouldn't depend on map iteration order.
 func TestPartitionGoneSortable(t *testing.T) {
