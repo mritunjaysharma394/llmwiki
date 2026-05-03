@@ -29,7 +29,8 @@ func (d *DB) Close() error {
 }
 
 func (d *DB) migrate() error {
-	stmts := []string{
+	// Idempotent legacy schema (predates versioning).
+	legacyStmts := []string{
 		`CREATE TABLE IF NOT EXISTS sources (
 			id INTEGER PRIMARY KEY,
 			uri TEXT UNIQUE,
@@ -62,10 +63,60 @@ func (d *DB) migrate() error {
 			INSERT INTO pages_fts(pages_fts, rowid, title, body) VALUES ('delete', old.id, old.title, old.body);
 		END`,
 	}
-	for _, stmt := range stmts {
+	for _, stmt := range legacyStmts {
 		if _, err := d.sql.Exec(stmt); err != nil {
-			return fmt.Errorf("exec %q: %w", stmt[:min(50, len(stmt))], err)
+			return fmt.Errorf("legacy schema %q: %w", stmt[:min(50, len(stmt))], err)
 		}
+	}
+
+	var version int
+	if err := d.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return fmt.Errorf("read user_version: %w", err)
+	}
+
+	if version < 1 {
+		v1 := []string{
+			`CREATE TABLE IF NOT EXISTS evidence (
+				id INTEGER PRIMARY KEY,
+				page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+				source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+				quote TEXT NOT NULL,
+				line_start INTEGER,
+				line_end INTEGER,
+				created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_evidence_page ON evidence(page_id)`,
+			`CREATE VIRTUAL TABLE IF NOT EXISTS evidence_fts USING fts5(quote, content=evidence, content_rowid=id)`,
+			`CREATE TRIGGER IF NOT EXISTS evidence_ai AFTER INSERT ON evidence BEGIN
+				INSERT INTO evidence_fts(rowid, quote) VALUES (new.id, new.quote);
+			END`,
+			`CREATE TRIGGER IF NOT EXISTS evidence_ad AFTER DELETE ON evidence BEGIN
+				INSERT INTO evidence_fts(evidence_fts, rowid, quote) VALUES ('delete', old.id, old.quote);
+			END`,
+			`CREATE TABLE IF NOT EXISTS saved_answers (
+				id INTEGER PRIMARY KEY,
+				question TEXT NOT NULL,
+				answer TEXT NOT NULL,
+				model TEXT,
+				cited_page_ids TEXT DEFAULT '[]',
+				created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+				file_path TEXT NOT NULL
+			)`,
+			`CREATE VIRTUAL TABLE IF NOT EXISTS saved_answers_fts USING fts5(question, answer, content=saved_answers, content_rowid=id)`,
+			`CREATE TRIGGER IF NOT EXISTS saved_answers_ai AFTER INSERT ON saved_answers BEGIN
+				INSERT INTO saved_answers_fts(rowid, question, answer) VALUES (new.id, new.question, new.answer);
+			END`,
+			`PRAGMA user_version = 1`,
+		}
+		for _, stmt := range v1 {
+			if _, err := d.sql.Exec(stmt); err != nil {
+				return fmt.Errorf("v1 migration %q: %w", stmt[:min(50, len(stmt))], err)
+			}
+		}
+	}
+
+	if _, err := d.sql.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		return fmt.Errorf("enable foreign_keys: %w", err)
 	}
 	return nil
 }
