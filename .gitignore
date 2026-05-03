@@ -1,0 +1,13 @@
+# Build output
+/llmwiki
+
+# Local wiki data
+.llmwiki/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
