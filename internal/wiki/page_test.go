@@ -3,6 +3,7 @@ package wiki
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -73,6 +74,66 @@ func TestPagePathSanitizes(t *testing.T) {
 }
 
 var _ = Page{Evidence: []Evidence{{}}}
+
+func TestEvidenceSourceFilePathRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	p := Page{
+		Title:       "T",
+		Body:        "b",
+		ContentHash: "h",
+		UpdatedAt:   time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC),
+		Evidence: []Evidence{
+			{Quote: "q1", LineStart: 1, LineEnd: 2, SourceFilePath: "internal/db/db.go"},
+			{Quote: "q2", LineStart: 3, LineEnd: 3, SourceFilePath: "page-4"},
+		},
+	}
+	if err := WritePage(p, dir); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadPage(filepath.Join(dir, "T.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Evidence) != 2 {
+		t.Fatalf("got %d evidence rows, want 2", len(got.Evidence))
+	}
+	if got.Evidence[0].SourceFilePath != "internal/db/db.go" {
+		t.Errorf("ev[0].SourceFilePath = %q", got.Evidence[0].SourceFilePath)
+	}
+	if got.Evidence[1].SourceFilePath != "page-4" {
+		t.Errorf("ev[1].SourceFilePath = %q", got.Evidence[1].SourceFilePath)
+	}
+}
+
+func TestEvidenceSourceFilePathOmittedWhenEmpty(t *testing.T) {
+	dir := t.TempDir()
+	p := Page{
+		Title:       "U",
+		Body:        "b",
+		ContentHash: "h",
+		UpdatedAt:   time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC),
+		Evidence: []Evidence{
+			{Quote: "no path", LineStart: 1, LineEnd: 1},
+		},
+	}
+	if err := WritePage(p, dir); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "U.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "source_file:") {
+		t.Errorf("source_file should be omitted when empty; file:\n%s", string(data))
+	}
+	got, err := ReadPage(filepath.Join(dir, "U.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Evidence) != 1 || got.Evidence[0].SourceFilePath != "" {
+		t.Errorf("got %+v", got.Evidence)
+	}
+}
 
 func TestWritePageCreatesDir(t *testing.T) {
 	dir := t.TempDir()

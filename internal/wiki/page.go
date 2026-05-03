@@ -16,9 +16,10 @@ type Link struct {
 }
 
 type Evidence struct {
-	Quote     string
-	LineStart int
-	LineEnd   int
+	Quote          string
+	LineStart      int
+	LineEnd        int
+	SourceFilePath string
 }
 
 type Page struct {
@@ -80,6 +81,9 @@ func WritePage(p Page, wikiDir string) error {
 			sb.WriteString(fmt.Sprintf("  - quote: \"%s\"\n", esc))
 			sb.WriteString(fmt.Sprintf("    line_start: %d\n", e.LineStart))
 			sb.WriteString(fmt.Sprintf("    line_end: %d\n", e.LineEnd))
+			if e.SourceFilePath != "" {
+				sb.WriteString(fmt.Sprintf("    source_file: %s\n", yamlEscapeScalar(e.SourceFilePath)))
+			}
 		}
 	}
 	sb.WriteString("---\n\n")
@@ -147,10 +151,29 @@ func ParsePage(content string) (Page, error) {
 			curEv.LineStart, _ = strconv.Atoi(strings.TrimSpace(line[16:]))
 		case inEvidence && strings.HasPrefix(line, "    line_end: "):
 			curEv.LineEnd, _ = strconv.Atoi(strings.TrimSpace(line[14:]))
+		case inEvidence && strings.HasPrefix(line, "    source_file: "):
+			raw := strings.TrimSpace(line[len("    source_file: "):])
+			if strings.HasPrefix(raw, `"`) && strings.HasSuffix(raw, `"`) && len(raw) >= 2 {
+				curEv.SourceFilePath = unescapeQuote(raw)
+			} else {
+				curEv.SourceFilePath = raw
+			}
 		}
 	}
 	flushEv()
 	return p, nil
+}
+
+// yamlEscapeScalar quotes the string only when it contains characters that
+// would confuse the line-oriented YAML parser used by ParsePage.
+func yamlEscapeScalar(s string) string {
+	if s == "" || strings.ContainsAny(s, ":#[]{},&*!|>'\"%@`\n") {
+		esc := strings.ReplaceAll(s, `\`, `\\`)
+		esc = strings.ReplaceAll(esc, `"`, `\"`)
+		esc = strings.ReplaceAll(esc, "\n", `\n`)
+		return `"` + esc + `"`
+	}
+	return s
 }
 
 func unescapeQuote(s string) string {
