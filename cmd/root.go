@@ -8,6 +8,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
+	"github.com/mritunjaysharma394/llmwiki/internal/version"
 	"github.com/spf13/cobra"
 )
 
@@ -69,10 +70,12 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "llmwiki",
-	Short: "LLM-powered personal wiki",
+	Use:     "llmwiki",
+	Short:   "LLM-powered personal wiki",
+	Version: version.Format(),
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		if cmd.Name() == "init" || cmd.Name() == "help" {
+		switch cmd.Name() {
+		case "init", "help", "version":
 			return nil
 		}
 		return loadConfig()
@@ -150,6 +153,7 @@ func applyIngestDefaults(c *IngestConfig) {
 }
 
 func init() {
+	rootCmd.SetVersionTemplate("{{.Version}}\n")
 	rootCmd.PersistentFlags().StringVar(&overrideProvider, "provider", "", "override LLM provider (anthropic|ollama)")
 	rootCmd.PersistentFlags().StringVar(&overrideModel, "model", "", "override LLM model")
 	rootCmd.AddCommand(initCmd)
@@ -157,4 +161,5 @@ func init() {
 	rootCmd.AddCommand(askCmd)
 	rootCmd.AddCommand(lintCmd)
 	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(versionCmd)
 }
