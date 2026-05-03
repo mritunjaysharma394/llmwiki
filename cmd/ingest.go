@@ -31,6 +31,7 @@ func init() {
 	ingestCmd.Flags().String("exclude", "", "comma-separated extra skip globs (e.g. *.foo,vendor/*)")
 	ingestCmd.Flags().Bool("no-gitignore", false, "ignore .gitignore for this run")
 	ingestCmd.Flags().Bool("force", false, "ignore per-file unchanged check; re-ingest everything")
+	ingestCmd.Flags().Bool("no-rechunk", false, "skip co-resident re-chunking; only re-process files whose own content changed")
 }
 
 // buildIngestOptions resolves the runtime walker / URL fetcher options for
@@ -213,6 +214,41 @@ func runIngest(cmd *cobra.Command, args []string) error {
 		parts.unchanged = nil
 	}
 
+	if v, _ := cmd.Flags().GetBool("no-rechunk"); !v && len(parts.changed) > 0 {
+		// Build prior-chunks map for this source.
+		priorChunks := map[string][]string{}
+		for _, ch := range parts.changed {
+			chunks, err := database.GetChunksForFile(sourceID, ch.RelativePath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  WARN reading prior chunks for %s: %v\n", ch.RelativePath, err)
+				continue
+			}
+			for _, c := range chunks {
+				priorChunks[c.ChunkHash] = c.FilePaths
+			}
+		}
+		changedPaths := make([]string, len(parts.changed))
+		for i, f := range parts.changed {
+			changedPaths[i] = f.RelativePath
+		}
+		dirtyPaths := ingest.MarkCoResidentDirty(changedPaths, priorChunks)
+
+		// Promote each dirty co-resident from `unchanged` into `changed`.
+		dirtySet := map[string]bool{}
+		for _, p := range dirtyPaths {
+			dirtySet[p] = true
+		}
+		stillUnchanged := parts.unchanged[:0]
+		for _, f := range parts.unchanged {
+			if dirtySet[f.RelativePath] {
+				parts.changed = append(parts.changed, f)
+			} else {
+				stillUnchanged = append(stillUnchanged, f)
+			}
+		}
+		parts.unchanged = stillUnchanged
+	}
+
 	fmt.Printf("Walking %s (%d files: %d new, %d changed, %d unchanged, %d gone)\n",
 		source, len(sourceFiles), len(parts.newFiles), len(parts.changed), len(parts.unchanged), len(parts.gone))
 
@@ -299,6 +335,27 @@ func runIngest(cmd *cobra.Command, args []string) error {
 				fmt.Fprintf(os.Stderr, "  WARN clear evidence for %s: %v\n", f.RelativePath, err)
 			}
 		}
+	}
+
+	// Replace prior chunk bookkeeping for this source with the fresh pack.
+	if err := database.DeleteChunksForSource(sourceID); err != nil {
+		fmt.Fprintf(os.Stderr, "  WARN clearing chunks for source %d: %v\n", sourceID, err)
+	}
+	var chunkRows []db.Chunk
+	for _, ch := range chunks {
+		hash := sha256.Sum256([]byte(ch.Text))
+		paths := make([]string, len(ch.Files))
+		for i, f := range ch.Files {
+			paths[i] = f.RelativePath
+		}
+		chunkRows = append(chunkRows, db.Chunk{
+			SourceID:  sourceID,
+			ChunkHash: fmt.Sprintf("%x", hash),
+			FilePaths: paths,
+		})
+	}
+	if err := database.InsertChunks(chunkRows); err != nil {
+		fmt.Fprintf(os.Stderr, "  WARN persisting chunks for source %d: %v\n", sourceID, err)
 	}
 
 	var allPages []wiki.Page

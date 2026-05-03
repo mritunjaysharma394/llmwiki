@@ -215,6 +215,12 @@ func TestSplitCSV(t *testing.T) {
 	}
 }
 
+func TestIngestFlagNoRechunkRegistered(t *testing.T) {
+	if ingestCmd.Flags().Lookup("no-rechunk") == nil {
+		t.Fatal("--no-rechunk flag not registered")
+	}
+}
+
 // sanity assertion: paths in `gone` are returned in arbitrary order; tests
 // shouldn't depend on map iteration order.
 func TestPartitionGoneSortable(t *testing.T) {
