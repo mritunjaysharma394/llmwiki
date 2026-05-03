@@ -1,0 +1,26 @@
+{
+  "version": "https://jsonfeed.org/version/1.1",
+  "title": "Sample JSON Feed",
+  "home_page_url": "https://example.test/",
+  "feed_url": "https://example.test/feed.json",
+  "items": [
+    {
+      "id": "https://example.test/post-1",
+      "url": "https://example.test/post-1",
+      "title": "Post One",
+      "content_html": "<p>First post body.</p>"
+    },
+    {
+      "id": "https://example.test/post-2",
+      "url": "https://example.test/post-2",
+      "title": "Post Two",
+      "content_html": "<p>Second post body.</p>"
+    },
+    {
+      "id": "https://example.test/post-3",
+      "url": "https://example.test/post-3",
+      "title": "Post Three",
+      "content_html": "<p>Third post body.</p>"
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Sample Atom Feed</title>
+  <id>https://example.test/</id>
+  <updated>2026-05-01T00:00:00Z</updated>
+  <entry>
+    <title>Post One</title>
+    <id>https://example.test/post-1</id>
+    <link href="https://example.test/post-1"/>
+    <updated>2026-05-01T00:00:00Z</updated>
+    <content type="html">&lt;p&gt;First post body.&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <title>Post Two</title>
+    <id>https://example.test/post-2</id>
+    <link href="https://example.test/post-2"/>
+    <updated>2026-05-02T00:00:00Z</updated>
+    <content type="html">&lt;p&gt;Second post body.&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <title>Post Three</title>
+    <id>https://example.test/post-3</id>
+    <link href="https://example.test/post-3"/>
+    <updated>2026-05-03T00:00:00Z</updated>
+    <content type="html">&lt;p&gt;Third post body.&lt;/p&gt;</content>
+  </entry>
+</feed>

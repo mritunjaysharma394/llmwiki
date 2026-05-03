@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Sample RSS Feed</title>
+    <link>https://example.test/</link>
+    <description>fixture</description>
+    <item>
+      <title>Post One</title>
+      <link>https://example.test/post-1</link>
+      <description>&lt;p&gt;First post body.&lt;/p&gt;</description>
+    </item>
+    <item>
+      <title>Post Two</title>
+      <link>https://example.test/post-2</link>
+      <description>&lt;p&gt;Second post body.&lt;/p&gt;</description>
+    </item>
+    <item>
+      <title>Post Three</title>
+      <link>https://example.test/post-3</link>
+      <description>&lt;p&gt;Third post body.&lt;/p&gt;</description>
+    </item>
+  </channel>
+</rss>
