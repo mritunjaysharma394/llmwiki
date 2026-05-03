@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
 )
 
@@ -44,7 +45,8 @@ var writePagesTool = llm.ToolSchema{
 						"items": map[string]any{
 							"type": "object",
 							"properties": map[string]any{
-								"quote":       map[string]any{"type": "string", "description": "Verbatim substring of SOURCE"},
+								"quote":       map[string]any{"type": "string", "description": "Verbatim substring of the named source_file's content"},
+								"source_file": map[string]any{"type": "string", "description": "the path shown in the === path === marker the quote was copied from"},
 								"explanation": map[string]any{"type": "string", "description": "Optional: why this quote supports the page"},
 							},
 							"required": []string{"quote"},
@@ -60,15 +62,26 @@ var writePagesTool = llm.ToolSchema{
 
 const ingestSystemPrompt = `You write wiki pages strictly grounded in the SOURCE provided.
 
-RULES:
-1. Every page MUST include "evidence" — verbatim spans copied character-for-character from SOURCE that justify the page's claims.
-2. Do NOT include general knowledge that is not in SOURCE.
-3. If SOURCE doesn't contain enough material for a high-quality page on a topic, do NOT create that page.
-4. Better to return one solid page than five thin ones. Aim for 1-4 pages per call.
-5. Page bodies should synthesize and organize, but every claim must be defensible from the evidence quotes you provide.
-6. When linking pages, only reference existing pages or pages you are creating in this same call.`
+The SOURCE may contain multiple files, each delimited by a header line:
+    === path/to/file.ext ===
+For every evidence quote, set "source_file" to the exact path shown in the
+header above the file the quote was copied from. Quotes from different files
+must each have their own evidence entry naming the correct file.
 
-func IngestToPages(ctx context.Context, client llm.Client, sourceContent string, existingTitles []string) ([]Page, error) {
+RULES:
+1. Every page MUST include "evidence" — verbatim spans copied character-for-character from one of the files in SOURCE that justify the page's claims.
+2. Each evidence entry SHOULD set "source_file" to the path from the "=== path ===" marker above its quote.
+3. Do NOT include general knowledge that is not in SOURCE.
+4. If SOURCE doesn't contain enough material for a high-quality page on a topic, do NOT create that page.
+5. Better to return one solid page than five thin ones. Aim for 1-4 pages per call.
+6. Page bodies should synthesize and organize, but every claim must be defensible from the evidence quotes you provide.
+7. When linking pages, only reference existing pages or pages you are creating in this same call.`
+
+// IngestSourceFilesToPages is the multi-file entry point: each SourceFile's
+// content is presented to the LLM under a "=== path ===" marker, and the
+// validator anchors each evidence quote to the file the LLM named in
+// source_file (with a content-search fallback when source_file is empty).
+func IngestSourceFilesToPages(ctx context.Context, client llm.Client, files []ingest.SourceFile, existingTitles []string) ([]Page, error) {
 	var sb strings.Builder
 	sb.WriteString("Existing wiki pages (titles only):\n")
 	if len(existingTitles) == 0 {
@@ -79,7 +92,16 @@ func IngestToPages(ctx context.Context, client llm.Client, sourceContent string,
 		}
 	}
 	sb.WriteString("\n---\nSOURCE to ingest:\n\n")
-	sb.WriteString(sourceContent)
+	for i, f := range files {
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString(fmt.Sprintf("=== %s ===\n", f.RelativePath))
+		sb.WriteString(f.Content)
+		if !strings.HasSuffix(f.Content, "\n") {
+			sb.WriteString("\n")
+		}
+	}
 
 	result, err := client.CompleteStructured(ctx, ingestSystemPrompt, sb.String(), writePagesTool)
 	if err != nil {
@@ -90,13 +112,22 @@ func IngestToPages(ctx context.Context, client llm.Client, sourceContent string,
 	if err != nil {
 		return nil, err
 	}
-	pages, _ = ValidateAndAttachEvidence(pages, sourceContent)
+	pages, _ = ValidateAndAttachEvidence(pages, files)
 	now := time.Now().UTC()
 	for i := range pages {
 		pages[i].UpdatedAt = now
 		pages[i].ContentHash = HashContent(pages[i].Body)
 	}
 	return pages, nil
+}
+
+// IngestToPages is the legacy single-string entry point. It wraps the source
+// in a single synthetic SourceFile and delegates to IngestSourceFilesToPages.
+// New callers should use IngestSourceFilesToPages directly so they can pass
+// per-file paths that the validator can attribute quotes to.
+func IngestToPages(ctx context.Context, client llm.Client, sourceContent string, existingTitles []string) ([]Page, error) {
+	files := []ingest.SourceFile{ingest.NewSourceFile("source", []byte(sourceContent))}
+	return IngestSourceFilesToPages(ctx, client, files, existingTitles)
 }
 
 // ExtractPagesFromToolResult parses the LLM tool-call result into Page structs.
@@ -138,8 +169,9 @@ func ExtractPagesFromToolResult(result map[string]any) ([]Page, error) {
 			for _, er := range evRaw {
 				if em, ok := er.(map[string]any); ok {
 					q, _ := em["quote"].(string)
+					sf, _ := em["source_file"].(string)
 					if q != "" {
-						p.Evidence = append(p.Evidence, Evidence{Quote: q})
+						p.Evidence = append(p.Evidence, Evidence{Quote: q, SourceFilePath: sf})
 					}
 				}
 			}
@@ -152,11 +184,17 @@ func ExtractPagesFromToolResult(result map[string]any) ([]Page, error) {
 }
 
 // ValidateAndAttachEvidence drops evidence quotes that are not verbatim
-// substrings of source, drops pages that have zero valid evidence after that,
-// and computes line_start/line_end for surviving quotes (1-indexed).
+// substrings of the SourceFile they claim to come from (or, when no source_file
+// was named, of any provided file), drops pages that have zero valid evidence
+// after that, and computes line_start/line_end for surviving quotes (1-indexed)
+// against the matched file.
 //
 // Returns (kept pages, count of pages dropped).
-func ValidateAndAttachEvidence(pages []Page, source string) ([]Page, int) {
+func ValidateAndAttachEvidence(pages []Page, files []ingest.SourceFile) ([]Page, int) {
+	byPath := make(map[string]*ingest.SourceFile, len(files))
+	for i := range files {
+		byPath[files[i].RelativePath] = &files[i]
+	}
 	var kept []Page
 	dropped := 0
 	for _, p := range pages {
@@ -165,14 +203,28 @@ func ValidateAndAttachEvidence(pages []Page, source string) ([]Page, int) {
 			if e.Quote == "" {
 				continue
 			}
-			idx := strings.Index(source, e.Quote)
-			if idx < 0 {
-				fmt.Fprintf(os.Stderr, "  WARN dropped quote in page %q — not present in source\n", p.Title)
+			file, attributedBy := lookupOrFallback(e, byPath, files)
+			if file == nil {
+				if e.SourceFilePath != "" {
+					fmt.Fprintf(os.Stderr, "  WARN dropped quote in page %q: source_file %q not in this chunk\n", p.Title, e.SourceFilePath)
+				} else {
+					fmt.Fprintf(os.Stderr, "  WARN dropped quote in page %q: not present in any source file\n", p.Title)
+				}
 				continue
 			}
-			start, end := lineRange(source, idx, len(e.Quote))
+			idx := strings.Index(file.Content, e.Quote)
+			if idx < 0 {
+				fmt.Fprintf(os.Stderr, "  WARN dropped quote in page %q: not present in %s\n", p.Title, file.RelativePath)
+				continue
+			}
+			start, end := lineRange(file.Content, idx, len(e.Quote))
 			e.LineStart = start
 			e.LineEnd = end
+			matchedPath := file.RelativePath
+			if attributedBy == "fallback" {
+				fmt.Fprintf(os.Stderr, "  WARN quote in page %q missing source_file, attributed to %q by content match\n", p.Title, matchedPath)
+			}
+			e.SourceFilePath = matchedPath
 			valid = append(valid, e)
 		}
 		if len(valid) == 0 {
@@ -184,6 +236,25 @@ func ValidateAndAttachEvidence(pages []Page, source string) ([]Page, int) {
 		kept = append(kept, p)
 	}
 	return kept, dropped
+}
+
+// lookupOrFallback returns the named SourceFile if e.SourceFilePath is non-empty
+// and known. If empty, scans all files for the quote (first match wins) and
+// reports "fallback" so the caller can warn. If the named path is unknown,
+// returns (nil, "named") so the caller drops with a clear message.
+func lookupOrFallback(e Evidence, byPath map[string]*ingest.SourceFile, files []ingest.SourceFile) (*ingest.SourceFile, string) {
+	if e.SourceFilePath != "" {
+		if f, ok := byPath[e.SourceFilePath]; ok {
+			return f, "named"
+		}
+		return nil, "named"
+	}
+	for i := range files {
+		if strings.Contains(files[i].Content, e.Quote) {
+			return &files[i], "fallback"
+		}
+	}
+	return nil, "fallback"
 }
 
 // lineRange returns 1-indexed (start, end) line numbers for a substring at
