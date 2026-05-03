@@ -2,7 +2,9 @@ package db
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestOpenCreatesEvidenceAndSavedAnswers(t *testing.T) {
@@ -79,7 +81,7 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 	}
 }
 
-func mustOpenForCascadeTest(t *testing.T) *DB {
+func mustOpen(t *testing.T) *DB {
 	t.Helper()
 	d, err := Open(filepath.Join(t.TempDir(), "wiki.db"))
 	if err != nil {
@@ -108,7 +110,7 @@ func mustInsert(t *testing.T, d *DB, q string, args ...any) int64 {
 }
 
 func TestEvidenceCascadesOnPageDelete(t *testing.T) {
-	d := mustOpenForCascadeTest(t)
+	d := mustOpen(t)
 	srcID := mustInsert(t, d, `INSERT INTO sources (uri, content_hash) VALUES ('u', 'h') RETURNING id`)
 	pageID := mustInsert(t, d, `INSERT INTO pages (title, body, content_hash) VALUES ('P', 'b', 'h') RETURNING id`)
 	mustExec(t, d, `INSERT INTO evidence (page_id, source_id, quote) VALUES (?, ?, 'q')`, pageID, srcID)
@@ -122,7 +124,7 @@ func TestEvidenceCascadesOnPageDelete(t *testing.T) {
 }
 
 func TestEvidenceCascadesOnSourceDelete(t *testing.T) {
-	d := mustOpenForCascadeTest(t)
+	d := mustOpen(t)
 	srcID := mustInsert(t, d, `INSERT INTO sources (uri, content_hash) VALUES ('u2', 'h') RETURNING id`)
 	pageID := mustInsert(t, d, `INSERT INTO pages (title, body, content_hash) VALUES ('P2', 'b', 'h') RETURNING id`)
 	mustExec(t, d, `INSERT INTO evidence (page_id, source_id, quote) VALUES (?, ?, 'q')`, pageID, srcID)
@@ -136,7 +138,7 @@ func TestEvidenceCascadesOnSourceDelete(t *testing.T) {
 }
 
 func TestEvidenceFTSTriggers(t *testing.T) {
-	d := mustOpenForCascadeTest(t)
+	d := mustOpen(t)
 	srcID := mustInsert(t, d, `INSERT INTO sources (uri, content_hash) VALUES ('u', 'h') RETURNING id`)
 	pageID := mustInsert(t, d, `INSERT INTO pages (title, body, content_hash) VALUES ('P', 'b', 'h') RETURNING id`)
 	evID := mustInsert(t, d, `INSERT INTO evidence (page_id, source_id, quote) VALUES (?, ?, 'kafka consumer group') RETURNING id`, pageID, srcID)
@@ -160,7 +162,7 @@ func TestEvidenceFTSTriggers(t *testing.T) {
 }
 
 func TestSavedAnswersFTSTrigger(t *testing.T) {
-	d := mustOpenForCascadeTest(t)
+	d := mustOpen(t)
 	id := mustInsert(t, d, `INSERT INTO saved_answers (question, answer, file_path) VALUES ('what is X', 'X is Y', 'p.md') RETURNING id`)
 	var got int64
 	if err := d.sql.QueryRow(`SELECT rowid FROM saved_answers_fts WHERE saved_answers_fts MATCH 'what'`).Scan(&got); err != nil {
@@ -168,5 +170,119 @@ func TestSavedAnswersFTSTrigger(t *testing.T) {
 	}
 	if got != id {
 		t.Errorf("rowid = %d, want %d", got, id)
+	}
+}
+
+func TestEvidenceCRUD(t *testing.T) {
+	d := mustOpen(t)
+	srcID, err := d.UpsertSource("file:///foo.txt", "abc123")
+	if err != nil {
+		t.Fatalf("UpsertSource: %v", err)
+	}
+	if err := d.UpsertPage(PageRecord{Title: "Page A", Path: "wiki/page-a.md", Body: "body", ContentHash: "h1", SourceIDs: []int64{srcID}}); err != nil {
+		t.Fatalf("UpsertPage: %v", err)
+	}
+	page, _ := d.GetPage("Page A")
+	if page == nil {
+		t.Fatal("page not found after upsert")
+	}
+
+	if err := d.InsertEvidence(page.ID, srcID, []Evidence{
+		{Quote: "the quick brown fox", LineStart: 3, LineEnd: 3},
+		{Quote: "lazy dog", LineStart: 5, LineEnd: 5},
+	}); err != nil {
+		t.Fatalf("InsertEvidence: %v", err)
+	}
+
+	got, err := d.GetEvidenceForPage(page.ID)
+	if err != nil {
+		t.Fatalf("GetEvidenceForPage: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d evidence rows, want 2", len(got))
+	}
+	if got[0].Quote != "the quick brown fox" {
+		t.Errorf("first quote = %q", got[0].Quote)
+	}
+}
+
+func TestSearchEvidence(t *testing.T) {
+	d := mustOpen(t)
+	srcID, _ := d.UpsertSource("u", "h")
+	d.UpsertPage(PageRecord{Title: "P1", Path: "p1.md", Body: "b1", ContentHash: "h", SourceIDs: []int64{srcID}})
+	d.UpsertPage(PageRecord{Title: "P2", Path: "p2.md", Body: "b2", ContentHash: "h", SourceIDs: []int64{srcID}})
+	p1, _ := d.GetPage("P1")
+	p2, _ := d.GetPage("P2")
+	d.InsertEvidence(p1.ID, srcID, []Evidence{{Quote: "kafka consumer group offset"}})
+	d.InsertEvidence(p2.ID, srcID, []Evidence{{Quote: "rabbitmq dead letter"}})
+
+	hits, err := d.SearchEvidence("kafka", 10)
+	if err != nil {
+		t.Fatalf("SearchEvidence: %v", err)
+	}
+	if len(hits) != 1 || hits[0].PageID != p1.ID {
+		t.Errorf("hits = %+v, want one for p1", hits)
+	}
+}
+
+func TestDeleteEvidenceForSource(t *testing.T) {
+	d := mustOpen(t)
+	srcID, _ := d.UpsertSource("u", "h")
+	d.UpsertPage(PageRecord{Title: "P1", Path: "p.md", Body: "b", ContentHash: "h", SourceIDs: []int64{srcID}})
+	p, _ := d.GetPage("P1")
+	d.InsertEvidence(p.ID, srcID, []Evidence{{Quote: "to be deleted"}})
+
+	if err := d.DeleteEvidenceForSource(srcID); err != nil {
+		t.Fatalf("DeleteEvidenceForSource: %v", err)
+	}
+	got, _ := d.GetEvidenceForPage(p.ID)
+	if len(got) != 0 {
+		t.Errorf("got %d evidence after delete, want 0", len(got))
+	}
+}
+
+func TestSavedAnswerCRUD(t *testing.T) {
+	d := mustOpen(t)
+	id, err := d.InsertSavedAnswer(SavedAnswer{
+		Question:     "what is X?",
+		Answer:       "X is Y",
+		Model:        "claude-haiku-4-5",
+		CitedPageIDs: []int64{1, 2},
+		FilePath:     ".llmwiki/answers/2026-05-03-101010-what-is-x.md",
+		CreatedAt:    time.Now(),
+	})
+	if err != nil || id == 0 {
+		t.Fatalf("InsertSavedAnswer: id=%d err=%v", id, err)
+	}
+	hits, err := d.SearchSavedAnswers("what", 10)
+	if err != nil {
+		t.Fatalf("SearchSavedAnswers: %v", err)
+	}
+	if len(hits) != 1 || !strings.Contains(hits[0].Question, "what") {
+		t.Errorf("hits = %+v", hits)
+	}
+}
+
+func TestStatsIncludesEvidenceAndAnswers(t *testing.T) {
+	d := mustOpen(t)
+	srcID, _ := d.UpsertSource("u", "h")
+	d.UpsertPage(PageRecord{Title: "P1", Path: "p.md", Body: "b", ContentHash: "h", SourceIDs: []int64{srcID}})
+	p, _ := d.GetPage("P1")
+	d.InsertEvidence(p.ID, srcID, []Evidence{{Quote: "q"}})
+	d.UpsertPage(PageRecord{Title: "Legacy", Path: "l.md", Body: "b", ContentHash: "h", SourceIDs: []int64{srcID}})
+	d.InsertSavedAnswer(SavedAnswer{Question: "q", Answer: "a", FilePath: "f.md", CreatedAt: time.Now()})
+
+	stats, err := d.GetStats()
+	if err != nil {
+		t.Fatalf("GetStats: %v", err)
+	}
+	if stats.EvidenceQuotes != 1 {
+		t.Errorf("EvidenceQuotes=%d, want 1", stats.EvidenceQuotes)
+	}
+	if stats.LegacyPages != 1 {
+		t.Errorf("LegacyPages=%d, want 1", stats.LegacyPages)
+	}
+	if stats.SavedAnswers != 1 {
+		t.Errorf("SavedAnswers=%d, want 1", stats.SavedAnswers)
 	}
 }
