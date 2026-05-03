@@ -29,8 +29,8 @@ func TestOpenCreatesEvidenceAndSavedAnswers(t *testing.T) {
 	if err := d.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("user_version: %v", err)
 	}
-	if version != 2 {
-		t.Errorf("user_version = %d, want 2", version)
+	if version != 3 {
+		t.Errorf("user_version = %d, want 3", version)
 	}
 }
 
@@ -51,8 +51,8 @@ func TestOpenIsIdempotent(t *testing.T) {
 	if err := d2.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("user_version: %v", err)
 	}
-	if version != 2 {
-		t.Errorf("user_version after re-open = %d, want 2", version)
+	if version != 3 {
+		t.Errorf("user_version after re-open = %d, want 3", version)
 	}
 }
 
@@ -76,8 +76,8 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 	defer d2.Close()
 	var version int
 	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&version)
-	if version != 2 {
-		t.Errorf("user_version after upgrade = %d, want 2", version)
+	if version != 3 {
+		t.Errorf("user_version after upgrade = %d, want 3", version)
 	}
 }
 
@@ -112,8 +112,8 @@ func TestOpenAtFreshV2(t *testing.T) {
 	}
 	var version int
 	d.sql.QueryRow(`PRAGMA user_version`).Scan(&version)
-	if version != 2 {
-		t.Errorf("user_version = %d, want 2", version)
+	if version != 3 {
+		t.Errorf("user_version = %d, want 3", version)
 	}
 }
 
@@ -137,8 +137,8 @@ func TestOpenUpgradesV1ToV2(t *testing.T) {
 	defer d2.Close()
 	var v int
 	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v)
-	if v != 2 {
-		t.Errorf("user_version after upgrade = %d, want 2", v)
+	if v != 3 {
+		t.Errorf("user_version after upgrade = %d, want 3", v)
 	}
 	var name string
 	if err := d2.sql.QueryRow(`SELECT name FROM sqlite_master WHERE name = 'source_files'`).Scan(&name); err != nil {
@@ -166,8 +166,44 @@ func TestOpenUpgradesLegacyV0ToV2(t *testing.T) {
 	defer d2.Close()
 	var v int
 	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v)
-	if v != 2 {
-		t.Errorf("user_version after v0->v2 upgrade = %d, want 2", v)
+	if v != 3 {
+		t.Errorf("user_version after v0->v2 upgrade = %d, want 3", v)
+	}
+}
+
+func TestOpenAtFreshV3(t *testing.T) {
+	d := mustOpen(t)
+	var name string
+	if err := d.sql.QueryRow(`SELECT name FROM sqlite_master WHERE name = 'chunks'`).Scan(&name); err != nil {
+		t.Errorf("chunks table missing: %v", err)
+	}
+	var version int
+	d.sql.QueryRow(`PRAGMA user_version`).Scan(&version)
+	if version != 3 {
+		t.Errorf("user_version = %d, want 3", version)
+	}
+}
+
+func TestOpenUpgradesV2ToV3(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wiki.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.sql.Exec(`DROP TABLE chunks`)
+	d.sql.Exec(`PRAGMA user_version = 2`)
+	d.Close()
+
+	d2, err := Open(path)
+	if err != nil {
+		t.Fatalf("re-open: %v", err)
+	}
+	defer d2.Close()
+	var v int
+	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v)
+	if v != 3 {
+		t.Errorf("user_version after upgrade = %d, want 3", v)
 	}
 }
 

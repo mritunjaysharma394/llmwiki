@@ -144,6 +144,25 @@ func (d *DB) migrate() error {
 		}
 	}
 
+	if version < 3 {
+		v3 := []string{
+			`CREATE TABLE IF NOT EXISTS chunks (
+				id INTEGER PRIMARY KEY,
+				source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+				chunk_hash TEXT NOT NULL,
+				file_paths TEXT NOT NULL,
+				created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_id)`,
+			`PRAGMA user_version = 3`,
+		}
+		for _, stmt := range v3 {
+			if _, err := d.sql.Exec(stmt); err != nil {
+				return fmt.Errorf("v3 migration %q: %w", stmt[:min(50, len(stmt))], err)
+			}
+		}
+	}
+
 	if _, err := d.sql.Exec(`PRAGMA foreign_keys = ON`); err != nil {
 		return fmt.Errorf("enable foreign_keys: %w", err)
 	}
