@@ -45,6 +45,12 @@ type IngestConfig struct {
 	// (-> default true) from "explicitly set to false". TOML's zero value for
 	// bool is false, which is the wrong default for an absent block.
 	RespectGitignore *bool `toml:"respect_gitignore"`
+	// Sub-project 4 launch surface: feed/sitemap crawl tunables. Pre-v4
+	// configs without these keys decode to zero and pick up the defaults
+	// silently via applyIngestDefaults.
+	FeedRequestsPerSecond float64 `toml:"feed_request_per_second"`
+	FeedMaxEntries        int     `toml:"feed_max_entries"`
+	SitemapMaxPages       int     `toml:"sitemap_max_pages"`
 }
 
 type Config struct {
@@ -158,6 +164,15 @@ func applyIngestDefaults(c *IngestConfig) {
 	if c.RespectGitignore == nil {
 		t := true
 		c.RespectGitignore = &t
+	}
+	if c.FeedRequestsPerSecond == 0 {
+		c.FeedRequestsPerSecond = 1.0
+	}
+	if c.FeedMaxEntries == 0 {
+		c.FeedMaxEntries = 50
+	}
+	if c.SitemapMaxPages == 0 {
+		c.SitemapMaxPages = 200
 	}
 }
 

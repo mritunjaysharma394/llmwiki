@@ -31,6 +31,9 @@ pdf_min_text_per_page = 50
 extra_text_extensions = []
 extra_skip_globs = []
 respect_gitignore = true
+feed_request_per_second = 1.0
+feed_max_entries = 50
+sitemap_max_pages = 200
 `
 
 const defaultConfigOllamaToml = `[llm]
@@ -55,6 +58,9 @@ pdf_min_text_per_page = 50
 extra_text_extensions = []
 extra_skip_globs = []
 respect_gitignore = true
+feed_request_per_second = 1.0
+feed_max_entries = 50
+sitemap_max_pages = 200
 `
 
 var initCmd = &cobra.Command{

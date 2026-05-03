@@ -32,6 +32,35 @@ func init() {
 	ingestCmd.Flags().Bool("no-gitignore", false, "ignore .gitignore for this run")
 	ingestCmd.Flags().Bool("force", false, "ignore per-file unchanged check; re-ingest everything")
 	ingestCmd.Flags().Bool("no-rechunk", false, "skip co-resident re-chunking; only re-process files whose own content changed")
+	ingestCmd.Flags().Bool("feed", false, "force feed-parser dispatch")
+	ingestCmd.Flags().Bool("sitemap", false, "force sitemap dispatch")
+	ingestCmd.Flags().Int("max-pages", 0, "cap on feed entries / sitemap pages (0 uses [ingest] defaults)")
+}
+
+// DefaultFeedOptionsFromConfig resolves feed crawl tunables from the [ingest]
+// config block, falling back to package defaults when c is nil.
+func DefaultFeedOptionsFromConfig(c *Config) ingest.FeedOptions {
+	if c == nil {
+		return ingest.DefaultFeedOptions()
+	}
+	return ingest.FeedOptions{
+		RequestsPerSecond: c.Ingest.FeedRequestsPerSecond,
+		MaxEntries:        c.Ingest.FeedMaxEntries,
+	}
+}
+
+// DefaultSitemapOptionsFromConfig resolves sitemap crawl tunables from the
+// [ingest] config block, falling back to package defaults when c is nil. The
+// rate limit is shared with feeds — both sources speak the same polite-crawl
+// budget.
+func DefaultSitemapOptionsFromConfig(c *Config) ingest.SitemapOptions {
+	if c == nil {
+		return ingest.DefaultSitemapOptions()
+	}
+	return ingest.SitemapOptions{
+		MaxPages:          c.Ingest.SitemapMaxPages,
+		RequestsPerSecond: c.Ingest.FeedRequestsPerSecond,
+	}
 }
 
 // buildIngestOptions resolves the runtime walker / URL fetcher options for
@@ -165,7 +194,23 @@ func runIngest(cmd *cobra.Command, args []string) error {
 
 	var sourceFiles []ingest.SourceFile
 	var err error
+	forceFeed, _ := cmd.Flags().GetBool("feed")
+	forceSitemap, _ := cmd.Flags().GetBool("sitemap")
 	switch {
+	case forceFeed:
+		feedOpts := DefaultFeedOptionsFromConfig(cfg)
+		if mp, _ := cmd.Flags().GetInt("max-pages"); mp > 0 {
+			feedOpts.MaxEntries = mp
+		}
+		fmt.Printf("Fetching feed %s...\n", source)
+		sourceFiles, err = ingest.FetchFeedFiles(source, urlOpts, feedOpts)
+	case forceSitemap:
+		smOpts := DefaultSitemapOptionsFromConfig(cfg)
+		if mp, _ := cmd.Flags().GetInt("max-pages"); mp > 0 {
+			smOpts.MaxPages = mp
+		}
+		fmt.Printf("Crawling sitemap %s...\n", source)
+		sourceFiles, err = ingest.FetchSitemapFiles(source, urlOpts, smOpts)
 	case ingest.IsGitHubURL(source):
 		fmt.Printf("Cloning GitHub repo %s...\n", source)
 		sourceFiles, err = ingest.FetchGitHubFiles(source, walkOpts)

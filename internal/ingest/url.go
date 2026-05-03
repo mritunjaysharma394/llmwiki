@@ -96,6 +96,12 @@ func FetchURLFiles(rawURL string, opts URLOptions) ([]SourceFile, error) {
 	switch {
 	case ct == "application/pdf" || extLower == ".pdf":
 		return fetchPDFViaTempFile(body)
+	case isFeedContentType(ct, body):
+		// Re-dispatch through FetchFeedFiles, which re-fetches the feed body
+		// (cheap; gofeed parses URL directly). Acceptable double-fetch for v1.
+		return FetchFeedFiles(rawURL, opts, DefaultFeedOptions())
+	case isSitemapContentType(ct, body, parsed):
+		return FetchSitemapFiles(rawURL, opts, DefaultSitemapOptions())
 	case ct == "text/html", ct == "application/xhtml+xml":
 		return fetchHTMLAsMarkdown(body, rawURL)
 	case strings.HasPrefix(ct, "text/"):
@@ -103,6 +109,47 @@ func FetchURLFiles(rawURL string, opts URLOptions) ([]SourceFile, error) {
 	default:
 		return nil, fmt.Errorf("unsupported content-type %q for URL ingestion", ct)
 	}
+}
+
+// isFeedContentType returns true when the (content-type, body) pair looks like
+// an RSS, Atom, or JSON Feed. The XML branch peeks at the first 512 bytes for
+// a <rss> or <feed> root; the JSON branch sniffs for "version" + "jsonfeed.org"
+// to avoid false-positives on arbitrary application/json.
+func isFeedContentType(ct string, body []byte) bool {
+	switch ct {
+	case "application/rss+xml", "application/atom+xml":
+		return true
+	}
+	if ct == "application/json" {
+		// JSON Feed — sniff the "feed_url" or "version" key.
+		return bytes.Contains(body, []byte(`"version"`)) && bytes.Contains(body, []byte(`jsonfeed.org`))
+	}
+	if ct == "application/xml" || ct == "text/xml" {
+		head := body
+		if len(head) > 512 {
+			head = head[:512]
+		}
+		return bytes.Contains(head, []byte("<rss")) || bytes.Contains(head, []byte("<feed"))
+	}
+	return false
+}
+
+// isSitemapContentType returns true when the URL or body looks like a
+// sitemap.xml. The path-suffix check handles the common case where servers
+// return application/xml for /sitemap.xml; the body sniff catches index files
+// served from non-standard paths.
+func isSitemapContentType(ct string, body []byte, parsed *url.URL) bool {
+	if parsed != nil && strings.HasSuffix(strings.ToLower(parsed.Path), "sitemap.xml") {
+		return true
+	}
+	if ct == "application/xml" || ct == "text/xml" {
+		head := body
+		if len(head) > 512 {
+			head = head[:512]
+		}
+		return bytes.Contains(head, []byte("<urlset")) || bytes.Contains(head, []byte("<sitemapindex"))
+	}
+	return false
 }
 
 func fetchPDFViaTempFile(body []byte) ([]SourceFile, error) {
