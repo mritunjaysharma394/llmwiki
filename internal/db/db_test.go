@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -328,5 +329,89 @@ func TestSearchPagesAndEvidenceUnion(t *testing.T) {
 	hits, _ := d.SearchEvidence("scheduler", 5)
 	if len(hits) != 1 || hits[0].PageID != g.ID {
 		t.Errorf("evidence search: %+v", hits)
+	}
+}
+
+func TestSourceFileCRUD(t *testing.T) {
+	d := mustOpen(t)
+	srcID, _ := d.UpsertSource("file:///dir", "wholehash")
+
+	id1, err := d.UpsertSourceFile(SourceFile{SourceID: srcID, RelativePath: "a.go", ContentHash: "h1", ByteSize: 10, LineCount: 2})
+	if err != nil || id1 == 0 {
+		t.Fatalf("UpsertSourceFile: id=%d err=%v", id1, err)
+	}
+	id2, _ := d.UpsertSourceFile(SourceFile{SourceID: srcID, RelativePath: "b.go", ContentHash: "h2", ByteSize: 20, LineCount: 4})
+
+	// Re-upsert same path → same id, updated hash.
+	id1b, _ := d.UpsertSourceFile(SourceFile{SourceID: srcID, RelativePath: "a.go", ContentHash: "h1prime", ByteSize: 11, LineCount: 2})
+	if id1b != id1 {
+		t.Errorf("upsert returned new id %d, want stable %d", id1b, id1)
+	}
+
+	files, err := d.GetSourceFiles(srcID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("got %d source_files, want 2", len(files))
+	}
+	byPath := map[string]SourceFile{}
+	for _, f := range files {
+		byPath[f.RelativePath] = f
+	}
+	if byPath["a.go"].ContentHash != "h1prime" {
+		t.Errorf("a.go hash = %q, want h1prime", byPath["a.go"].ContentHash)
+	}
+
+	// Delete one, cascade evidence.
+	d.UpsertPage(PageRecord{Title: "P", Path: "p.md", Body: "b", ContentHash: "h", SourceIDs: []int64{srcID}})
+	page, _ := d.GetPage("P")
+	d.InsertEvidence(page.ID, srcID, []Evidence{{Quote: "q", SourceFileID: &id2}})
+
+	if err := d.DeleteSourceFile(id2); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := d.GetEvidenceForPage(page.ID)
+	if len(got) != 0 {
+		t.Errorf("evidence not cascade-deleted, got %d rows", len(got))
+	}
+}
+
+func TestStatsIncludesSourceFiles(t *testing.T) {
+	d := mustOpen(t)
+	s1, _ := d.UpsertSource("file:///big", "h")
+	s2, _ := d.UpsertSource("file:///small", "h")
+	for i := 0; i < 5; i++ {
+		d.UpsertSourceFile(SourceFile{SourceID: s1, RelativePath: fmt.Sprintf("f%d", i), ContentHash: "h", ByteSize: 1, LineCount: 1})
+	}
+	d.UpsertSourceFile(SourceFile{SourceID: s2, RelativePath: "f0", ContentHash: "h", ByteSize: 1, LineCount: 1})
+
+	stats, err := d.GetStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.TotalSourceFiles != 6 {
+		t.Errorf("TotalSourceFiles = %d, want 6", stats.TotalSourceFiles)
+	}
+	if len(stats.LargestSources) == 0 {
+		t.Fatal("LargestSources empty")
+	}
+	if stats.LargestSources[0].URI != "file:///big" || stats.LargestSources[0].FileCount != 5 {
+		t.Errorf("largest = %+v, want file:///big/5", stats.LargestSources[0])
+	}
+}
+
+func TestInsertEvidenceWithSourceFileID(t *testing.T) {
+	d := mustOpen(t)
+	srcID, _ := d.UpsertSource("u", "h")
+	sfID, _ := d.UpsertSourceFile(SourceFile{SourceID: srcID, RelativePath: "x.md", ContentHash: "h", ByteSize: 1, LineCount: 1})
+	d.UpsertPage(PageRecord{Title: "P", Path: "p", Body: "b", ContentHash: "h", SourceIDs: []int64{srcID}})
+	page, _ := d.GetPage("P")
+	if err := d.InsertEvidence(page.ID, srcID, []Evidence{{Quote: "q", SourceFileID: &sfID}}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := d.GetEvidenceForPage(page.ID)
+	if len(got) != 1 || got[0].SourceFileID == nil || *got[0].SourceFileID != sfID {
+		t.Errorf("evidence SourceFileID not round-tripped: %+v", got)
 	}
 }

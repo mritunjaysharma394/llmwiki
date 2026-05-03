@@ -32,23 +32,42 @@ type Link struct {
 }
 
 type Stats struct {
-	TotalPages     int
-	TotalSources   int
-	StalePages     int
-	EvidenceQuotes int
-	LegacyPages    int
-	SavedAnswers   int
-	LastIngest     time.Time
+	TotalPages       int
+	TotalSources     int
+	TotalSourceFiles int
+	StalePages       int
+	EvidenceQuotes   int
+	LegacyPages      int
+	SavedAnswers     int
+	LastIngest       time.Time
+	LargestSources   []LargestSource
+}
+
+type LargestSource struct {
+	SourceID  int64
+	URI       string
+	FileCount int
+}
+
+type SourceFile struct {
+	ID           int64
+	SourceID     int64
+	RelativePath string
+	ContentHash  string
+	ByteSize     int64
+	LineCount    int
+	IngestedAt   time.Time
 }
 
 type Evidence struct {
-	ID        int64
-	PageID    int64
-	SourceID  int64
-	Quote     string
-	LineStart int
-	LineEnd   int
-	CreatedAt time.Time
+	ID           int64
+	PageID       int64
+	SourceID     int64
+	SourceFileID *int64
+	Quote        string
+	LineStart    int
+	LineEnd      int
+	CreatedAt    time.Time
 }
 
 type EvidenceHit struct {
@@ -221,13 +240,77 @@ func (d *DB) GetStats() (Stats, error) {
 	var s Stats
 	d.sql.QueryRow(`SELECT COUNT(*) FROM pages`).Scan(&s.TotalPages)
 	d.sql.QueryRow(`SELECT COUNT(*) FROM sources`).Scan(&s.TotalSources)
+	d.sql.QueryRow(`SELECT COUNT(*) FROM source_files`).Scan(&s.TotalSourceFiles)
 	d.sql.QueryRow(`SELECT COUNT(*) FROM evidence`).Scan(&s.EvidenceQuotes)
 	d.sql.QueryRow(`SELECT COUNT(*) FROM pages p LEFT JOIN evidence e ON e.page_id = p.id WHERE e.id IS NULL`).Scan(&s.LegacyPages)
 	d.sql.QueryRow(`SELECT COUNT(*) FROM saved_answers`).Scan(&s.SavedAnswers)
 	var lastIngestStr string
 	d.sql.QueryRow(`SELECT MAX(ingested_at) FROM sources`).Scan(&lastIngestStr)
 	s.LastIngest, _ = time.Parse(time.RFC3339, lastIngestStr)
+
+	rows, err := d.sql.Query(`SELECT s.id, s.uri, COUNT(sf.id) AS n
+		FROM sources s LEFT JOIN source_files sf ON sf.source_id = s.id
+		GROUP BY s.id ORDER BY n DESC LIMIT 3`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var ls LargestSource
+			if err := rows.Scan(&ls.SourceID, &ls.URI, &ls.FileCount); err == nil {
+				s.LargestSources = append(s.LargestSources, ls)
+			}
+		}
+	}
 	return s, nil
+}
+
+func (d *DB) UpsertSourceFile(f SourceFile) (int64, error) {
+	var id int64
+	err := d.sql.QueryRow(
+		`INSERT INTO source_files (source_id, relative_path, content_hash, byte_size, line_count, ingested_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(source_id, relative_path) DO UPDATE SET
+			content_hash=excluded.content_hash,
+			byte_size=excluded.byte_size,
+			line_count=excluded.line_count,
+			ingested_at=excluded.ingested_at
+		RETURNING id`,
+		f.SourceID, f.RelativePath, f.ContentHash, f.ByteSize, f.LineCount,
+		time.Now().UTC().Format(time.RFC3339),
+	).Scan(&id)
+	return id, err
+}
+
+func (d *DB) GetSourceFiles(sourceID int64) ([]SourceFile, error) {
+	rows, err := d.sql.Query(
+		`SELECT id, source_id, relative_path, content_hash, byte_size, line_count, ingested_at
+		FROM source_files WHERE source_id = ? ORDER BY relative_path`,
+		sourceID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SourceFile
+	for rows.Next() {
+		var f SourceFile
+		var ts string
+		if err := rows.Scan(&f.ID, &f.SourceID, &f.RelativePath, &f.ContentHash, &f.ByteSize, &f.LineCount, &ts); err != nil {
+			return nil, err
+		}
+		f.IngestedAt, _ = time.Parse(time.RFC3339, ts)
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) DeleteSourceFile(id int64) error {
+	_, err := d.sql.Exec(`DELETE FROM source_files WHERE id = ?`, id)
+	return err
+}
+
+func (d *DB) DeleteEvidenceForSourceFile(sourceFileID int64) error {
+	_, err := d.sql.Exec(`DELETE FROM evidence WHERE source_file_id = ?`, sourceFileID)
+	return err
 }
 
 func (d *DB) InsertEvidence(pageID, sourceID int64, items []Evidence) error {
@@ -239,20 +322,23 @@ func (d *DB) InsertEvidence(pageID, sourceID int64, items []Evidence) error {
 		return err
 	}
 	defer tx.Rollback()
-	stmt, err := tx.Prepare(`INSERT INTO evidence (page_id, source_id, quote, line_start, line_end) VALUES (?, ?, ?, ?, ?)`)
+	stmt, err := tx.Prepare(`INSERT INTO evidence (page_id, source_id, source_file_id, quote, line_start, line_end) VALUES (?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
 	for _, e := range items {
-		var ls, le interface{}
+		var ls, le, sfid interface{}
 		if e.LineStart > 0 {
 			ls = e.LineStart
 		}
 		if e.LineEnd > 0 {
 			le = e.LineEnd
 		}
-		if _, err := stmt.Exec(pageID, sourceID, e.Quote, ls, le); err != nil {
+		if e.SourceFileID != nil {
+			sfid = *e.SourceFileID
+		}
+		if _, err := stmt.Exec(pageID, sourceID, sfid, e.Quote, ls, le); err != nil {
 			return fmt.Errorf("insert evidence: %w", err)
 		}
 	}
@@ -260,7 +346,7 @@ func (d *DB) InsertEvidence(pageID, sourceID int64, items []Evidence) error {
 }
 
 func (d *DB) GetEvidenceForPage(pageID int64) ([]Evidence, error) {
-	rows, err := d.sql.Query(`SELECT id, page_id, source_id, quote, COALESCE(line_start, 0), COALESCE(line_end, 0), created_at FROM evidence WHERE page_id = ? ORDER BY id`, pageID)
+	rows, err := d.sql.Query(`SELECT id, page_id, source_id, source_file_id, quote, COALESCE(line_start, 0), COALESCE(line_end, 0), created_at FROM evidence WHERE page_id = ? ORDER BY id`, pageID)
 	if err != nil {
 		return nil, err
 	}
@@ -268,9 +354,14 @@ func (d *DB) GetEvidenceForPage(pageID int64) ([]Evidence, error) {
 	var out []Evidence
 	for rows.Next() {
 		var e Evidence
+		var sfid sql.NullInt64
 		var created string
-		if err := rows.Scan(&e.ID, &e.PageID, &e.SourceID, &e.Quote, &e.LineStart, &e.LineEnd, &created); err != nil {
+		if err := rows.Scan(&e.ID, &e.PageID, &e.SourceID, &sfid, &e.Quote, &e.LineStart, &e.LineEnd, &created); err != nil {
 			return nil, err
+		}
+		if sfid.Valid {
+			v := sfid.Int64
+			e.SourceFileID = &v
 		}
 		e.CreatedAt, _ = time.Parse(time.RFC3339, created)
 		out = append(out, e)
@@ -280,7 +371,7 @@ func (d *DB) GetEvidenceForPage(pageID int64) ([]Evidence, error) {
 
 func (d *DB) SearchEvidence(query string, limit int) ([]EvidenceHit, error) {
 	rows, err := d.sql.Query(
-		`SELECT e.id, e.page_id, e.source_id, e.quote, COALESCE(e.line_start, 0), COALESCE(e.line_end, 0), e.created_at, p.title
+		`SELECT e.id, e.page_id, e.source_id, e.source_file_id, e.quote, COALESCE(e.line_start, 0), COALESCE(e.line_end, 0), e.created_at, p.title
 		FROM evidence e
 		JOIN pages p ON p.id = e.page_id
 		WHERE e.id IN (SELECT rowid FROM evidence_fts WHERE evidence_fts MATCH ?)
@@ -294,9 +385,14 @@ func (d *DB) SearchEvidence(query string, limit int) ([]EvidenceHit, error) {
 	var out []EvidenceHit
 	for rows.Next() {
 		var h EvidenceHit
+		var sfid sql.NullInt64
 		var created string
-		if err := rows.Scan(&h.ID, &h.PageID, &h.SourceID, &h.Quote, &h.LineStart, &h.LineEnd, &created, &h.PageTitle); err != nil {
+		if err := rows.Scan(&h.ID, &h.PageID, &h.SourceID, &sfid, &h.Quote, &h.LineStart, &h.LineEnd, &created, &h.PageTitle); err != nil {
 			return nil, err
+		}
+		if sfid.Valid {
+			v := sfid.Int64
+			h.SourceFileID = &v
 		}
 		h.CreatedAt, _ = time.Parse(time.RFC3339, created)
 		out = append(out, h)
