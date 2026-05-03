@@ -10,6 +10,8 @@ import (
 	"strings"
 )
 
+var _ Client = (*OllamaClient)(nil)
+
 type OllamaClient struct {
 	model  string
 	apiURL string
@@ -65,6 +67,17 @@ func (c *OllamaClient) Complete(ctx context.Context, system, user string) (strin
 		Prompt: user,
 		Stream: false,
 	})
+}
+
+func (c *OllamaClient) CompleteStream(ctx context.Context, system, user string, w io.Writer) (string, error) {
+	// Ollama path is non-streaming for sub-project 1 — buffer the full response
+	// and write it once. Degraded but functional.
+	resp, err := c.Complete(ctx, system, user)
+	if err != nil {
+		return "", err
+	}
+	_, _ = w.Write([]byte(resp))
+	return resp, nil
 }
 
 func (c *OllamaClient) CompleteStructured(ctx context.Context, system, user string, ts ToolSchema) (map[string]any, error) {

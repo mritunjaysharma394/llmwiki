@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"strings"
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/packages/param"
@@ -46,7 +48,10 @@ func (c *AnthropicClient) CompleteStructured(ctx context.Context, system, user s
 		Model:     anthropic.Model(c.model),
 		MaxTokens: 4096,
 		System: []anthropic.TextBlockParam{
-			{Text: system},
+			{
+				Text:         system,
+				CacheControl: anthropic.NewCacheControlEphemeralParam(),
+			},
 		},
 		Messages: []anthropic.MessageParam{
 			anthropic.NewUserMessage(anthropic.NewTextBlock(user)),
@@ -77,3 +82,37 @@ func (c *AnthropicClient) CompleteStructured(ctx context.Context, system, user s
 	}
 	return nil, fmt.Errorf("no tool use in response")
 }
+
+func (c *AnthropicClient) CompleteStream(ctx context.Context, system, user string, w io.Writer) (string, error) {
+	stream := c.client.Messages.NewStreaming(ctx, anthropic.MessageNewParams{
+		Model:     anthropic.Model(c.model),
+		MaxTokens: 4096,
+		System: []anthropic.TextBlockParam{
+			{Text: system},
+		},
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(anthropic.NewTextBlock(user)),
+		},
+	})
+	defer stream.Close()
+	var full strings.Builder
+	for stream.Next() {
+		event := stream.Current()
+		if event.Type == "content_block_delta" && event.Delta.Type == "text_delta" {
+			text := event.Delta.Text
+			if text == "" {
+				continue
+			}
+			if _, err := io.WriteString(w, text); err != nil {
+				return "", err
+			}
+			full.WriteString(text)
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return "", err
+	}
+	return full.String(), nil
+}
+
+var _ Client = (*AnthropicClient)(nil)

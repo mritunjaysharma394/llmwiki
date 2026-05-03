@@ -1,6 +1,9 @@
 package llm
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 type ToolSchema struct {
 	Name        string
@@ -12,4 +15,5 @@ type ToolSchema struct {
 type Client interface {
 	Complete(ctx context.Context, system, user string) (string, error)
 	CompleteStructured(ctx context.Context, system, user string, ts ToolSchema) (map[string]any, error)
+	CompleteStream(ctx context.Context, system, user string, w io.Writer) (string, error)
 }

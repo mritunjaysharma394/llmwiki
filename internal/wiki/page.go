@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -14,6 +15,12 @@ type Link struct {
 	Type string
 }
 
+type Evidence struct {
+	Quote     string
+	LineStart int
+	LineEnd   int
+}
+
 type Page struct {
 	Title       string
 	Body        string
@@ -21,6 +28,7 @@ type Page struct {
 	SourceIDs   []int64
 	ContentHash string
 	UpdatedAt   time.Time
+	Evidence    []Evidence
 }
 
 func HashContent(content string) string {
@@ -50,7 +58,7 @@ func WritePage(p Page, wikiDir string) error {
 	if len(p.SourceIDs) > 0 {
 		ids := make([]string, len(p.SourceIDs))
 		for i, id := range p.SourceIDs {
-			ids[i] = fmt.Sprintf("%d", id)
+			ids[i] = strconv.FormatInt(id, 10)
 		}
 		sb.WriteString(fmt.Sprintf("source_ids: [%s]\n", strings.Join(ids, ", ")))
 	} else {
@@ -60,6 +68,18 @@ func WritePage(p Page, wikiDir string) error {
 		sb.WriteString("links:\n")
 		for _, l := range p.Links {
 			sb.WriteString(fmt.Sprintf("  - to: %s\n    type: %s\n", l.To, l.Type))
+		}
+	}
+	if len(p.Evidence) > 0 {
+		sb.WriteString("evidence:\n")
+		for _, e := range p.Evidence {
+			esc := strings.ReplaceAll(e.Quote, `\`, `\\`)
+			esc = strings.ReplaceAll(esc, `"`, `\"`)
+			esc = strings.ReplaceAll(esc, "\n", `\n`)
+			esc = strings.ReplaceAll(esc, "\r", `\r`)
+			sb.WriteString(fmt.Sprintf("  - quote: \"%s\"\n", esc))
+			sb.WriteString(fmt.Sprintf("    line_start: %d\n", e.LineStart))
+			sb.WriteString(fmt.Sprintf("    line_end: %d\n", e.LineEnd))
 		}
 	}
 	sb.WriteString("---\n\n")
@@ -92,22 +112,55 @@ func ParsePage(content string) (Page, error) {
 	frontmatter := rest[:end]
 	p.Body = strings.TrimPrefix(rest[end+5:], "\n")
 
-	for _, line := range strings.Split(frontmatter, "\n") {
-		if after, ok := strings.CutPrefix(line, "title: "); ok {
-			p.Title = strings.TrimSpace(after)
-		} else if after, ok := strings.CutPrefix(line, "updated_at: "); ok {
-			p.UpdatedAt, _ = time.Parse(time.RFC3339, strings.TrimSpace(after))
-		} else if after, ok := strings.CutPrefix(line, "content_hash: "); ok {
-			p.ContentHash = strings.TrimSpace(after)
-		} else if after, ok := strings.CutPrefix(line, "source_ids: "); ok {
-			p.SourceIDs = parseIntArray(strings.TrimSpace(after))
-		} else if strings.HasPrefix(line, "  - to: ") {
-			p.Links = append(p.Links, Link{To: strings.TrimSpace(line[8:])})
-		} else if strings.HasPrefix(line, "    type: ") && len(p.Links) > 0 {
-			p.Links[len(p.Links)-1].Type = strings.TrimSpace(line[10:])
+	var inLinks, inEvidence bool
+	var curEv Evidence
+	flushEv := func() {
+		if curEv.Quote != "" {
+			p.Evidence = append(p.Evidence, curEv)
+			curEv = Evidence{}
 		}
 	}
+	for _, line := range strings.Split(frontmatter, "\n") {
+		switch {
+		case strings.HasPrefix(line, "title: "):
+			p.Title = strings.TrimSpace(line[7:])
+			inLinks, inEvidence = false, false
+		case strings.HasPrefix(line, "updated_at: "):
+			p.UpdatedAt, _ = time.Parse(time.RFC3339, strings.TrimSpace(line[12:]))
+		case strings.HasPrefix(line, "content_hash: "):
+			p.ContentHash = strings.TrimSpace(line[14:])
+		case strings.HasPrefix(line, "source_ids: "):
+			p.SourceIDs = parseIntArray(strings.TrimSpace(line[12:]))
+		case strings.HasPrefix(line, "links:"):
+			inLinks, inEvidence = true, false
+		case strings.HasPrefix(line, "evidence:"):
+			flushEv()
+			inLinks, inEvidence = false, true
+		case inLinks && strings.HasPrefix(line, "  - to: "):
+			p.Links = append(p.Links, Link{To: strings.TrimSpace(line[8:])})
+		case inLinks && strings.HasPrefix(line, "    type: ") && len(p.Links) > 0:
+			p.Links[len(p.Links)-1].Type = strings.TrimSpace(line[10:])
+		case inEvidence && strings.HasPrefix(line, "  - quote: "):
+			flushEv()
+			curEv.Quote = unescapeQuote(strings.TrimSpace(strings.TrimPrefix(line, "  - quote: ")))
+		case inEvidence && strings.HasPrefix(line, "    line_start: "):
+			curEv.LineStart, _ = strconv.Atoi(strings.TrimSpace(line[16:]))
+		case inEvidence && strings.HasPrefix(line, "    line_end: "):
+			curEv.LineEnd, _ = strconv.Atoi(strings.TrimSpace(line[14:]))
+		}
+	}
+	flushEv()
 	return p, nil
+}
+
+func unescapeQuote(s string) string {
+	s = strings.TrimPrefix(s, `"`)
+	s = strings.TrimSuffix(s, `"`)
+	s = strings.ReplaceAll(s, `\n`, "\n")
+	s = strings.ReplaceAll(s, `\r`, "\r")
+	s = strings.ReplaceAll(s, `\"`, `"`)
+	s = strings.ReplaceAll(s, `\\`, `\`)
+	return s
 }
 
 func parseIntArray(s string) []int64 {

@@ -3,6 +3,8 @@ package wiki
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -15,15 +17,16 @@ type IngestResult struct {
 
 var writePagesTool = llm.ToolSchema{
 	Name:        "write_pages",
-	Description: "Write wiki pages synthesized from the ingested source content.",
+	Description: "Write wiki pages synthesized from the ingested source content. Every page MUST include verbatim evidence quotes from the source.",
 	Properties: map[string]any{
 		"pages": map[string]any{
-			"type": "array",
+			"type":        "array",
+			"description": "Wiki pages. Aim for 1-4 pages per call. Better to return one solid page than five thin ones.",
 			"items": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"title": map[string]any{"type": "string", "description": "Page title, concise and specific"},
-					"body":  map[string]any{"type": "string", "description": "Markdown body content, well-structured"},
+					"title": map[string]any{"type": "string", "description": "Concise page title"},
+					"body":  map[string]any{"type": "string", "description": "Markdown body, well-structured"},
 					"links": map[string]any{
 						"type": "array",
 						"items": map[string]any{
@@ -35,19 +38,37 @@ var writePagesTool = llm.ToolSchema{
 							"required": []string{"to", "type"},
 						},
 					},
+					"evidence": map[string]any{
+						"type":        "array",
+						"description": "Verbatim quotes copied character-for-character from SOURCE. At least one required per page.",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"quote":       map[string]any{"type": "string", "description": "Verbatim substring of SOURCE"},
+								"explanation": map[string]any{"type": "string", "description": "Optional: why this quote supports the page"},
+							},
+							"required": []string{"quote"},
+						},
+					},
 				},
-				"required": []string{"title", "body"},
+				"required": []string{"title", "body", "evidence"},
 			},
 		},
 	},
 	Required: []string{"pages"},
 }
 
-func IngestToPages(ctx context.Context, client llm.Client, sourceContent string, existingTitles []string) ([]Page, error) {
-	system := `You are a knowledge management assistant. You extract key concepts from source content and organize them as wiki pages.
-Each page should focus on one concept. Use Markdown formatting for the body.
-Link pages to each other using typed links. Only reference existing pages or pages you are creating now.`
+const ingestSystemPrompt = `You write wiki pages strictly grounded in the SOURCE provided.
 
+RULES:
+1. Every page MUST include "evidence" — verbatim spans copied character-for-character from SOURCE that justify the page's claims.
+2. Do NOT include general knowledge that is not in SOURCE.
+3. If SOURCE doesn't contain enough material for a high-quality page on a topic, do NOT create that page.
+4. Better to return one solid page than five thin ones. Aim for 1-4 pages per call.
+5. Page bodies should synthesize and organize, but every claim must be defensible from the evidence quotes you provide.
+6. When linking pages, only reference existing pages or pages you are creating in this same call.`
+
+func IngestToPages(ctx context.Context, client llm.Client, sourceContent string, existingTitles []string) ([]Page, error) {
 	var sb strings.Builder
 	sb.WriteString("Existing wiki pages (titles only):\n")
 	if len(existingTitles) == 0 {
@@ -57,14 +78,30 @@ Link pages to each other using typed links. Only reference existing pages or pag
 			sb.WriteString("- " + t + "\n")
 		}
 	}
-	sb.WriteString("\n---\nSource content to ingest:\n\n")
+	sb.WriteString("\n---\nSOURCE to ingest:\n\n")
 	sb.WriteString(sourceContent)
 
-	result, err := client.CompleteStructured(ctx, system, sb.String(), writePagesTool)
+	result, err := client.CompleteStructured(ctx, ingestSystemPrompt, sb.String(), writePagesTool)
 	if err != nil {
 		return nil, fmt.Errorf("llm structured call: %w", err)
 	}
 
+	pages, err := ExtractPagesFromToolResult(result)
+	if err != nil {
+		return nil, err
+	}
+	pages, _ = ValidateAndAttachEvidence(pages, sourceContent)
+	now := time.Now().UTC()
+	for i := range pages {
+		pages[i].UpdatedAt = now
+		pages[i].ContentHash = HashContent(pages[i].Body)
+	}
+	return pages, nil
+}
+
+// ExtractPagesFromToolResult parses the LLM tool-call result into Page structs.
+// Does not validate evidence — call ValidateAndAttachEvidence next.
+func ExtractPagesFromToolResult(result map[string]any) ([]Page, error) {
 	pagesRaw, ok := result["pages"]
 	if !ok {
 		return nil, fmt.Errorf("no 'pages' in llm response (keys: %v)", keys(result))
@@ -73,36 +110,36 @@ Link pages to each other using typed links. Only reference existing pages or pag
 	if !ok {
 		return nil, fmt.Errorf("'pages' has unexpected type %T", pagesRaw)
 	}
-
-	now := time.Now().UTC()
 	var pages []Page
 	for _, raw := range pagesSlice {
 		pm, ok := raw.(map[string]any)
 		if !ok {
 			continue
 		}
-		p := Page{
-			UpdatedAt: now,
-		}
+		var p Page
 		if t, ok := pm["title"].(string); ok {
 			p.Title = t
 		}
 		if b, ok := pm["body"].(string); ok {
 			p.Body = b
 		}
-		p.ContentHash = HashContent(p.Body)
 		if linksRaw, ok := pm["links"].([]any); ok {
 			for _, lr := range linksRaw {
 				if lm, ok := lr.(map[string]any); ok {
-					l := Link{}
-					if to, ok := lm["to"].(string); ok {
-						l.To = to
+					to, _ := lm["to"].(string)
+					typ, _ := lm["type"].(string)
+					if to != "" {
+						p.Links = append(p.Links, Link{To: to, Type: typ})
 					}
-					if lt, ok := lm["type"].(string); ok {
-						l.Type = lt
-					}
-					if l.To != "" {
-						p.Links = append(p.Links, l)
+				}
+			}
+		}
+		if evRaw, ok := pm["evidence"].([]any); ok {
+			for _, er := range evRaw {
+				if em, ok := er.(map[string]any); ok {
+					q, _ := em["quote"].(string)
+					if q != "" {
+						p.Evidence = append(p.Evidence, Evidence{Quote: q})
 					}
 				}
 			}
@@ -114,19 +151,81 @@ Link pages to each other using typed links. Only reference existing pages or pag
 	return pages, nil
 }
 
-func AnswerQuestion(ctx context.Context, client llm.Client, question string, contextPages []Page) (string, error) {
-	system := `You are a knowledgeable assistant answering questions from a personal wiki.
-Use the provided wiki pages as your primary source. Cite pages by title using [Page Title] notation.
-If the wiki pages don't contain enough information, say so clearly.`
+// ValidateAndAttachEvidence drops evidence quotes that are not verbatim
+// substrings of source, drops pages that have zero valid evidence after that,
+// and computes line_start/line_end for surviving quotes (1-indexed).
+//
+// Returns (kept pages, count of pages dropped).
+func ValidateAndAttachEvidence(pages []Page, source string) ([]Page, int) {
+	var kept []Page
+	dropped := 0
+	for _, p := range pages {
+		var valid []Evidence
+		for _, e := range p.Evidence {
+			if e.Quote == "" {
+				continue
+			}
+			idx := strings.Index(source, e.Quote)
+			if idx < 0 {
+				fmt.Fprintf(os.Stderr, "  WARN dropped quote in page %q — not present in source\n", p.Title)
+				continue
+			}
+			start, end := lineRange(source, idx, len(e.Quote))
+			e.LineStart = start
+			e.LineEnd = end
+			valid = append(valid, e)
+		}
+		if len(valid) == 0 {
+			fmt.Fprintf(os.Stderr, "  WARN dropped page %q — no verifiable evidence\n", p.Title)
+			dropped++
+			continue
+		}
+		p.Evidence = valid
+		kept = append(kept, p)
+	}
+	return kept, dropped
+}
 
+// lineRange returns 1-indexed (start, end) line numbers for a substring at
+// byte offset idx of length n in source. Both start and end are inclusive.
+func lineRange(source string, idx, n int) (int, int) {
+	start := 1 + strings.Count(source[:idx], "\n")
+	end := start + strings.Count(source[idx:idx+n], "\n")
+	return start, end
+}
+
+const answerSystemPrompt = `You answer using the provided wiki pages and source quotes.
+Cite pages inline using [Page Title] notation.
+When using a verbatim quote from a source, render it as a markdown blockquote and label the line range, e.g.:
+> "channels block when full" (lines 4-4)
+
+If pages and quotes are insufficient, say so plainly. Do not fabricate.`
+
+func AnswerQuestion(ctx context.Context, client llm.Client, question string, contextPages []Page) (string, error) {
+	return client.Complete(ctx, answerSystemPrompt, buildAnswerUserPrompt(question, contextPages))
+}
+
+func StreamAnswer(ctx context.Context, client llm.Client, question string, contextPages []Page, w io.Writer) (string, error) {
+	return client.CompleteStream(ctx, answerSystemPrompt, buildAnswerUserPrompt(question, contextPages), w)
+}
+
+func buildAnswerUserPrompt(question string, pages []Page) string {
 	var sb strings.Builder
-	sb.WriteString("Wiki pages:\n\n")
-	for _, p := range contextPages {
-		sb.WriteString(fmt.Sprintf("## %s\n\n%s\n\n---\n\n", p.Title, p.Body))
+	sb.WriteString("## Wiki pages\n\n")
+	for _, p := range pages {
+		sb.WriteString(fmt.Sprintf("### %s\n\n%s\n", p.Title, p.Body))
+		if len(p.Evidence) > 0 {
+			sb.WriteString("\n**Source quotes for this page:**\n")
+			for _, e := range p.Evidence {
+				sb.WriteString(fmt.Sprintf("> %q  (lines %d-%d)\n", e.Quote, e.LineStart, e.LineEnd))
+			}
+		} else {
+			sb.WriteString("\n*(no source quotes attached — legacy page)*\n")
+		}
+		sb.WriteString("\n---\n\n")
 	}
 	sb.WriteString(fmt.Sprintf("Question: %s", question))
-
-	return client.Complete(ctx, system, sb.String())
+	return sb.String()
 }
 
 func keys(m map[string]any) []string {
