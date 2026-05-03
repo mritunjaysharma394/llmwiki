@@ -451,3 +451,29 @@ func TestInsertEvidenceWithSourceFileID(t *testing.T) {
 		t.Errorf("evidence SourceFileID not round-tripped: %+v", got)
 	}
 }
+
+func TestChunkCRUD(t *testing.T) {
+	d := mustOpen(t)
+	srcID, _ := d.UpsertSource("u", "h")
+	c1 := Chunk{SourceID: srcID, ChunkHash: "h1", FilePaths: []string{"a.go", "b.go"}}
+	c2 := Chunk{SourceID: srcID, ChunkHash: "h2", FilePaths: []string{"c.go"}}
+	if err := d.InsertChunks([]Chunk{c1, c2}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := d.GetChunksForFile(srcID, "a.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ChunkHash != "h1" {
+		t.Errorf("GetChunksForFile a.go = %+v", got)
+	}
+
+	if err := d.DeleteChunksForSource(srcID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = d.GetChunksForFile(srcID, "a.go")
+	if len(got) != 0 {
+		t.Errorf("post-delete = %+v", got)
+	}
+}

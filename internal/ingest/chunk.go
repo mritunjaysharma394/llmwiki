@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -119,4 +120,43 @@ func makeSplitChunk(f SourceFile, body string, startLine, endLine int) Chunk {
 		Text:   text,
 		Files:  []SourceFile{f}, // entire SourceFile is the validation anchor; line numbers are within the full Content
 	}
+}
+
+// MarkCoResidentDirty returns the union of `changed` plus every file that
+// shared a prior chunk with any element of `changed`. Used by re-ingest to
+// keep cross-file synthesis stable when a single neighbour grows enough to
+// shift bin-packing decisions.
+//
+// priorChunks maps a chunk identifier (caller-defined; typically the chunk
+// hash) to the list of relative paths that chunk packed. When priorChunks is
+// nil or empty, MarkCoResidentDirty returns `changed` unchanged — fresh
+// ingests have no prior chunks to consult.
+func MarkCoResidentDirty(changed []string, priorChunks map[string][]string) []string {
+	dirty := map[string]bool{}
+	for _, p := range changed {
+		dirty[p] = true
+	}
+	for _, p := range changed {
+		for _, paths := range priorChunks {
+			has := false
+			for _, q := range paths {
+				if q == p {
+					has = true
+					break
+				}
+			}
+			if !has {
+				continue
+			}
+			for _, q := range paths {
+				dirty[q] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(dirty))
+	for k := range dirty {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

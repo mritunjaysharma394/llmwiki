@@ -240,3 +240,44 @@ func firstLine(s string) string {
 	}
 	return s
 }
+
+func TestMarkCoResidentDirtyPicksNeighbours(t *testing.T) {
+	priorChunks := map[string][]string{
+		// chunkA contained a.go + b.go + c.go
+		"chunkA": {"a.go", "b.go", "c.go"},
+		// chunkB contained d.go alone
+		"chunkB": {"d.go"},
+	}
+	changed := []string{"a.go"}
+	dirty := MarkCoResidentDirty(changed, priorChunks)
+
+	want := map[string]bool{"a.go": true, "b.go": true, "c.go": true}
+	if len(dirty) != 3 {
+		t.Errorf("got %d dirty, want 3: %v", len(dirty), dirty)
+	}
+	for _, p := range dirty {
+		if !want[p] {
+			t.Errorf("unexpected dirty file: %q", p)
+		}
+	}
+}
+
+func TestMarkCoResidentDirtyMultipleChangedDeduped(t *testing.T) {
+	priorChunks := map[string][]string{
+		"chunkA": {"a.go", "b.go"},
+		"chunkB": {"b.go", "c.go"},
+	}
+	dirty := MarkCoResidentDirty([]string{"a.go", "c.go"}, priorChunks)
+	// a.go pulls in b.go via chunkA; c.go pulls in b.go via chunkB. b.go appears
+	// once.
+	if len(dirty) != 3 {
+		t.Errorf("got %d dirty, want 3 (a, b, c): %v", len(dirty), dirty)
+	}
+}
+
+func TestMarkCoResidentDirtyEmptyPrior(t *testing.T) {
+	dirty := MarkCoResidentDirty([]string{"a.go"}, nil)
+	if len(dirty) != 1 || dirty[0] != "a.go" {
+		t.Errorf("got %v, want [a.go]", dirty)
+	}
+}

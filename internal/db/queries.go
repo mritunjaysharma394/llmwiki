@@ -456,6 +456,94 @@ func (d *DB) PagesWithoutEvidence() ([]PageRecord, error) {
 	return scanPages(rows)
 }
 
+type Chunk struct {
+	ID        int64
+	SourceID  int64
+	ChunkHash string
+	FilePaths []string
+	CreatedAt time.Time
+}
+
+func (d *DB) InsertChunks(chunks []Chunk) error {
+	if len(chunks) == 0 {
+		return nil
+	}
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`INSERT INTO chunks (source_id, chunk_hash, file_paths) VALUES (?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, c := range chunks {
+		paths, _ := json.Marshal(c.FilePaths)
+		if _, err := stmt.Exec(c.SourceID, c.ChunkHash, string(paths)); err != nil {
+			return fmt.Errorf("insert chunk: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
+// GetChunksForFile returns chunks that included relativePath in their pack.
+// Uses LIKE on the JSON-encoded array; for the v1 row volumes (low thousands
+// at most) this is fast enough and avoids needing JSON1 builds of sqlite.
+func (d *DB) GetChunksForFile(sourceID int64, relativePath string) ([]Chunk, error) {
+	pat := "%" + jsonEscape(relativePath) + "%"
+	rows, err := d.sql.Query(
+		`SELECT id, source_id, chunk_hash, file_paths, created_at
+		 FROM chunks WHERE source_id = ? AND file_paths LIKE ?`,
+		sourceID, pat,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Chunk
+	for rows.Next() {
+		var c Chunk
+		var paths string
+		var ts string
+		if err := rows.Scan(&c.ID, &c.SourceID, &c.ChunkHash, &paths, &ts); err != nil {
+			return nil, err
+		}
+		json.Unmarshal([]byte(paths), &c.FilePaths)
+		c.CreatedAt, _ = time.Parse(time.RFC3339, ts)
+		// Filter out false positives from the LIKE: ensure the path is in the
+		// JSON array exactly.
+		exact := false
+		for _, p := range c.FilePaths {
+			if p == relativePath {
+				exact = true
+				break
+			}
+		}
+		if exact {
+			out = append(out, c)
+		}
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) DeleteChunksForSource(sourceID int64) error {
+	_, err := d.sql.Exec(`DELETE FROM chunks WHERE source_id = ?`, sourceID)
+	return err
+}
+
+// jsonEscape is the minimal escape needed for LIKE patterns over JSON-encoded
+// strings: the path itself can contain characters that LIKE treats specially
+// (% and _). We escape them with a backslash and use LIKE ... ESCAPE '\\'.
+// In practice file paths don't contain % or _ in the underscore-as-glob sense,
+// but be defensive.
+func jsonEscape(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
 func (d *DB) GetAllSources() ([]Source, error) {
 	rows, err := d.sql.Query(`SELECT id, uri, content_hash, ingested_at FROM sources`)
 	if err != nil {
