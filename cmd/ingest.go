@@ -4,7 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
-	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,48 +27,157 @@ var ingestCmd = &cobra.Command{
 	RunE:  runIngest,
 }
 
+// filePartition splits an incoming []ingest.SourceFile against the existing
+// db.SourceFile rows for a source, classifying each by what the dedup pass
+// should do with it.
+type filePartition struct {
+	unchanged []ingest.SourceFile // path matches and content_hash matches → skip
+	changed   []ingest.SourceFile // path matches but hash differs → re-ingest, drop old evidence
+	newFiles  []ingest.SourceFile // path absent from existing rows → ingest
+	gone      []db.SourceFile     // present in existing rows, absent from incoming → delete row + cascade evidence
+}
+
+// partitionByFileHash classifies incoming SourceFiles against the rows already
+// stored under this source. Pure function — no db access — so it's straight
+// forward to unit-test.
+func partitionByFileHash(incoming []ingest.SourceFile, existing map[string]db.SourceFile) filePartition {
+	var p filePartition
+	seen := map[string]bool{}
+	for _, f := range incoming {
+		seen[f.RelativePath] = true
+		ex, ok := existing[f.RelativePath]
+		switch {
+		case !ok:
+			p.newFiles = append(p.newFiles, f)
+		case ex.ContentHash == f.ContentHash:
+			p.unchanged = append(p.unchanged, f)
+		default:
+			p.changed = append(p.changed, f)
+		}
+	}
+	for path, ex := range existing {
+		if !seen[path] {
+			p.gone = append(p.gone, ex)
+		}
+	}
+	return p
+}
+
+// computeWholeHash returns a deterministic hash over the per-file
+// (RelativePath, ContentHash) pairs sorted by path. Reordering the slice
+// produces the same hash; changing any single file's content does not.
+func computeWholeHash(files []ingest.SourceFile) string {
+	h := sha256.New()
+	paths := make([]string, len(files))
+	byPath := make(map[string]ingest.SourceFile, len(files))
+	for i, f := range files {
+		paths[i] = f.RelativePath
+		byPath[f.RelativePath] = f
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		h.Write([]byte(p))
+		h.Write([]byte{0})
+		h.Write([]byte(byPath[p].ContentHash))
+		h.Write([]byte{0})
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+// forceFlag returns the value of --force, defaulting to false when the flag
+// hasn't been registered yet (Task 12 wires it up).
+func forceFlag(cmd *cobra.Command) bool {
+	f := cmd.Flags().Lookup("force")
+	if f == nil {
+		return false
+	}
+	v, _ := cmd.Flags().GetBool("force")
+	return v
+}
+
 func runIngest(cmd *cobra.Command, args []string) error {
 	source := args[0]
 	ctx := cmd.Context()
 
-	// Fetch content based on source type
-	var content string
+	walkOpts := ingest.DefaultWalkOptions()
+	urlOpts := ingest.DefaultURLOptions()
+
+	var sourceFiles []ingest.SourceFile
 	var err error
 	switch {
 	case ingest.IsGitHubURL(source):
 		fmt.Printf("Cloning GitHub repo %s...\n", source)
-		content, err = ingest.FetchGitHub(source)
+		sourceFiles, err = ingest.FetchGitHubFiles(source, walkOpts)
 	case strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://"):
 		fmt.Printf("Fetching URL %s...\n", source)
-		content, err = ingest.FetchURL(source)
+		sourceFiles, err = ingest.FetchURLFiles(source, urlOpts)
 	default:
 		fmt.Printf("Reading local path %s...\n", source)
-		content, err = ingest.ReadLocal(source)
+		sourceFiles, err = ingest.ReadLocalFiles(source, walkOpts)
 	}
 	if err != nil {
 		return fmt.Errorf("reading source: %w", err)
 	}
-	if strings.TrimSpace(content) == "" {
+	if len(sourceFiles) == 0 {
 		return fmt.Errorf("no content found in source")
 	}
+	fmt.Printf("Resolved to %d source file(s)\n", len(sourceFiles))
 
-	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
-
-	existing, err := database.GetSource(source)
+	wholeHash := computeWholeHash(sourceFiles)
+	existingSrc, err := database.GetSource(source)
 	if err != nil {
 		return fmt.Errorf("checking source: %w", err)
 	}
-	if existing != nil && existing.ContentHash == hash {
-		fmt.Println("Source unchanged, skipping.")
+	if existingSrc != nil && existingSrc.ContentHash == wholeHash && !forceFlag(cmd) {
+		fmt.Println("Source unchanged at file level, skipping.")
 		return nil
 	}
 
-	rawPath := filepath.Join(cfg.Wiki.RawDir, hash+".txt")
-	if err := os.MkdirAll(cfg.Wiki.RawDir, 0755); err != nil {
-		return err
+	// Record the source row early so source_files can FK against it.
+	sourceID, err := database.UpsertSource(source, wholeHash)
+	if err != nil {
+		return fmt.Errorf("recording source: %w", err)
 	}
-	if err := os.WriteFile(rawPath, []byte(content), 0644); err != nil {
-		return fmt.Errorf("writing raw: %w", err)
+
+	existingFiles := map[string]db.SourceFile{}
+	if rows, err := database.GetSourceFiles(sourceID); err == nil {
+		for _, f := range rows {
+			existingFiles[f.RelativePath] = f
+		}
+	}
+	parts := partitionByFileHash(sourceFiles, existingFiles)
+
+	if forceFlag(cmd) {
+		// Treat unchanged-by-hash as changed; the user explicitly asked for re-ingest.
+		parts.changed = append(parts.changed, parts.unchanged...)
+		parts.unchanged = nil
+	}
+
+	fmt.Printf("Walking %s (%d files: %d new, %d changed, %d unchanged, %d gone)\n",
+		source, len(sourceFiles), len(parts.newFiles), len(parts.changed), len(parts.unchanged), len(parts.gone))
+
+	// Reap files that disappeared from the source.
+	for _, gone := range parts.gone {
+		fmt.Printf("  - removing %s (gone)\n", gone.RelativePath)
+		if err := database.DeleteSourceFile(gone.ID); err != nil {
+			fmt.Fprintf(os.Stderr, "  WARN delete source_file %s: %v\n", gone.RelativePath, err)
+		}
+	}
+
+	toIngest := append([]ingest.SourceFile{}, parts.newFiles...)
+	toIngest = append(toIngest, parts.changed...)
+	if len(toIngest) == 0 && len(parts.gone) == 0 {
+		fmt.Println("Source unchanged at file level, skipping.")
+		return nil
+	}
+	if len(toIngest) == 0 {
+		fmt.Printf("No new or changed files; reaped %d removed file(s).\n", len(parts.gone))
+		return nil
+	}
+
+	chunks := ingest.ChunkSourceFiles(toIngest, ingestChunkSize)
+	if len(chunks) > 1 {
+		fmt.Printf("  Packing into %d chunks (max %d in flight)\n", len(chunks), ingestMaxInflight)
 	}
 
 	titles, err := database.AllPageTitles()
@@ -76,127 +185,139 @@ func runIngest(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("fetching titles: %w", err)
 	}
 
-	chunks := chunkContent(content, ingestChunkSize)
-	if len(chunks) > 1 {
-		fmt.Printf("  Content is %d bytes, processing %d chunks (max %d in flight)...\n",
-			len(content), len(chunks), ingestMaxInflight)
-	}
-
-	type result struct {
+	type chunkResult struct {
 		pages []wiki.Page
 		err   error
 		idx   int
 	}
-	results := make([]result, len(chunks))
-
+	results := make([]chunkResult, len(chunks))
 	sem := make(chan struct{}, ingestMaxInflight)
 	var wg sync.WaitGroup
 	var done int64
-
-	for i, chunk := range chunks {
+	for i, ch := range chunks {
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(i int, chunk string) {
+		go func(i int, ch ingest.Chunk) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			got, err := wiki.IngestToPages(ctx, llmClient, chunk, titles)
-			results[i] = result{pages: got, err: err, idx: i}
+			got, err := wiki.IngestSourceFilesToPages(ctx, llmClient, ch.Files, titles)
+			results[i] = chunkResult{pages: got, err: err, idx: i}
 			n := atomic.AddInt64(&done, 1)
 			fmt.Printf("\r  [%d/%d] processed", n, len(chunks))
-		}(i, chunk)
+		}(i, ch)
 	}
 	wg.Wait()
 	if len(chunks) > 1 {
 		fmt.Println()
 	}
 
-	var pages []wiki.Page
+	// Upsert source_files rows for every file we attempted to ingest. The
+	// ON CONFLICT path keeps the same id when re-ingesting a changed file,
+	// so DeleteEvidenceForSourceFile below targets the right rows.
+	pathToFileID := map[string]int64{}
+	for _, f := range toIngest {
+		id, err := database.UpsertSourceFile(db.SourceFile{
+			SourceID:     sourceID,
+			RelativePath: f.RelativePath,
+			ContentHash:  f.ContentHash,
+			ByteSize:     f.ByteSize,
+			LineCount:    f.LineCount,
+		})
+		if err != nil {
+			return fmt.Errorf("upsert source_file %s: %w", f.RelativePath, err)
+		}
+		pathToFileID[f.RelativePath] = id
+	}
+	// Clear stale evidence for changed files before re-inserting fresh rows.
+	for _, f := range parts.changed {
+		if id := pathToFileID[f.RelativePath]; id != 0 {
+			if err := database.DeleteEvidenceForSourceFile(id); err != nil {
+				fmt.Fprintf(os.Stderr, "  WARN clear evidence for %s: %v\n", f.RelativePath, err)
+			}
+		}
+	}
+
+	var allPages []wiki.Page
 	for _, r := range results {
 		if r.err != nil {
 			fmt.Printf("  WARN chunk %d failed: %v\n", r.idx+1, r.err)
 			continue
 		}
-		pages = append(pages, r.pages...)
+		allPages = append(allPages, r.pages...)
 	}
-	if len(pages) == 0 {
+	if len(allPages) == 0 {
 		fmt.Println("LLM produced no pages with verifiable evidence.")
 		return nil
-	}
-
-	sourceID, err := database.UpsertSource(source, hash)
-	if err != nil {
-		return fmt.Errorf("recording source: %w", err)
-	}
-
-	if existing != nil && existing.ContentHash != hash {
-		if err := database.DeleteEvidenceForSource(sourceID); err != nil {
-			return fmt.Errorf("clearing old evidence: %w", err)
-		}
 	}
 
 	if err := os.MkdirAll(cfg.Wiki.WikiDir, 0755); err != nil {
 		return err
 	}
-	for i := range pages {
-		pages[i].SourceIDs = []int64{sourceID}
-		path := wiki.PagePath(cfg.Wiki.WikiDir, pages[i].Title)
-		if err := wiki.WritePage(pages[i], cfg.Wiki.WikiDir); err != nil {
-			return fmt.Errorf("writing page %q: %w", pages[i].Title, err)
+	for i := range allPages {
+		allPages[i].SourceIDs = []int64{sourceID}
+		path := wiki.PagePath(cfg.Wiki.WikiDir, allPages[i].Title)
+		if err := wiki.WritePage(allPages[i], cfg.Wiki.WikiDir); err != nil {
+			return fmt.Errorf("writing page %q: %w", allPages[i].Title, err)
 		}
 		rec := db.PageRecord{
-			Title:       pages[i].Title,
+			Title:       allPages[i].Title,
 			Path:        path,
-			Body:        pages[i].Body,
-			ContentHash: pages[i].ContentHash,
-			SourceIDs:   pages[i].SourceIDs,
+			Body:        allPages[i].Body,
+			ContentHash: allPages[i].ContentHash,
+			SourceIDs:   allPages[i].SourceIDs,
 		}
 		if err := database.UpsertPage(rec); err != nil {
-			return fmt.Errorf("db upsert %q: %w", pages[i].Title, err)
+			return fmt.Errorf("db upsert %q: %w", allPages[i].Title, err)
 		}
 
-		stored, err := database.GetPage(pages[i].Title)
+		stored, err := database.GetPage(allPages[i].Title)
 		if err != nil || stored == nil {
-			return fmt.Errorf("re-fetch page %q: %v", pages[i].Title, err)
+			return fmt.Errorf("re-fetch page %q: %v", allPages[i].Title, err)
 		}
 		var dbEv []db.Evidence
-		for _, e := range pages[i].Evidence {
-			dbEv = append(dbEv, db.Evidence{Quote: e.Quote, LineStart: e.LineStart, LineEnd: e.LineEnd})
+		for _, e := range allPages[i].Evidence {
+			var sfPtr *int64
+			if id, ok := pathToFileID[e.SourceFilePath]; ok && id != 0 {
+				v := id
+				sfPtr = &v
+			}
+			dbEv = append(dbEv, db.Evidence{
+				Quote:        e.Quote,
+				LineStart:    e.LineStart,
+				LineEnd:      e.LineEnd,
+				SourceFileID: sfPtr,
+			})
 		}
 		if err := database.InsertEvidence(stored.ID, sourceID, dbEv); err != nil {
-			return fmt.Errorf("insert evidence for %q: %w", pages[i].Title, err)
+			return fmt.Errorf("insert evidence for %q: %w", allPages[i].Title, err)
 		}
 
 		var links []db.Link
-		for _, l := range pages[i].Links {
-			links = append(links, db.Link{FromPage: pages[i].Title, ToPage: l.To, LinkType: l.Type})
+		for _, l := range allPages[i].Links {
+			links = append(links, db.Link{FromPage: allPages[i].Title, ToPage: l.To, LinkType: l.Type})
 		}
 		if len(links) > 0 {
-			database.UpsertLinks(pages[i].Title, links)
+			database.UpsertLinks(allPages[i].Title, links)
 		}
-		fmt.Printf("  ✓ %s (%d evidence)\n", pages[i].Title, len(pages[i].Evidence))
-	}
-	fmt.Printf("Ingested %d page(s) from %s\n", len(pages), source)
-	return nil
-}
 
-func chunkContent(s string, size int) []string {
-	if len(s) <= size {
-		return []string{s}
-	}
-	var chunks []string
-	for len(s) > 0 {
-		if len(s) <= size {
-			chunks = append(chunks, s)
-			break
+		// Distinct list of source files backing this page's evidence.
+		seen := map[string]bool{}
+		var distinctFiles []string
+		for _, e := range allPages[i].Evidence {
+			if e.SourceFilePath == "" || seen[e.SourceFilePath] {
+				continue
+			}
+			seen[e.SourceFilePath] = true
+			distinctFiles = append(distinctFiles, e.SourceFilePath)
 		}
-		end := size
-		if idx := strings.LastIndex(s[:end], "\n"); idx > size/2 {
-			end = idx + 1
+		annotation := ""
+		if len(distinctFiles) > 0 {
+			annotation = fmt.Sprintf(", files: %s", strings.Join(distinctFiles, ", "))
 		}
-		chunks = append(chunks, s[:end])
-		s = s[end:]
+		fmt.Printf("  ✓ %s (%d evidence%s)\n", allPages[i].Title, len(allPages[i].Evidence), annotation)
 	}
-	return chunks
+	fmt.Printf("Ingested %d page(s) from %s\n", len(allPages), source)
+	return nil
 }
 
 func slugify(s string) string {

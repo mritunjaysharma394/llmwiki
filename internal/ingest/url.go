@@ -8,24 +8,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
-	"unicode"
 
 	htmltomd "github.com/JohannesKaufmann/html-to-markdown/v2"
 	readability "github.com/go-shiori/go-readability"
 )
 
 const userAgentVersion = "0.1"
-
-var (
-	reTag      = regexp.MustCompile(`(?s)<[^>]*>`)
-	reScript   = regexp.MustCompile(`(?s)<script[^>]*>.*?</script>`)
-	reStyle    = regexp.MustCompile(`(?s)<style[^>]*>.*?</style>`)
-	reSpace    = regexp.MustCompile(`[ \t]+`)
-	reNewlines = regexp.MustCompile(`\n{3,}`)
-)
 
 // URLOptions tunes the URL fetcher used by FetchURLFiles.
 //
@@ -149,61 +139,3 @@ func fetchHTMLAsMarkdown(body []byte, srcURL string) ([]SourceFile, error) {
 	return []SourceFile{NewSourceFile("index.html", []byte(md))}, nil
 }
 
-// FetchURL is the legacy single-string fetcher kept for backward compatibility
-// with cmd/ingest.go until Task 11 rewires the caller. New code should use
-// FetchURLFiles.
-//
-// Deprecated: use FetchURLFiles.
-func FetchURL(rawURL string) (string, error) {
-	resp, err := http.Get(rawURL)
-	if err != nil {
-		return "", fmt.Errorf("fetching %s: %w", rawURL, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("HTTP %d fetching %s", resp.StatusCode, rawURL)
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	ct := resp.Header.Get("Content-Type")
-	if strings.Contains(ct, "text/html") {
-		return htmlToText(string(body)), nil
-	}
-	return string(body), nil
-}
-
-func htmlToText(html string) string {
-	text := reScript.ReplaceAllString(html, " ")
-	text = reStyle.ReplaceAllString(text, " ")
-	text = reTag.ReplaceAllString(text, " ")
-	text = decodeHTMLEntities(text)
-	lines := strings.Split(text, "\n")
-	var clean []string
-	for _, line := range lines {
-		line = reSpace.ReplaceAllString(line, " ")
-		line = strings.TrimFunc(line, unicode.IsSpace)
-		if line != "" {
-			clean = append(clean, line)
-		}
-	}
-	result := strings.Join(clean, "\n")
-	result = reNewlines.ReplaceAllString(result, "\n\n")
-	return strings.TrimSpace(result)
-}
-
-func decodeHTMLEntities(s string) string {
-	replacer := strings.NewReplacer(
-		"&amp;", "&",
-		"&lt;", "<",
-		"&gt;", ">",
-		"&quot;", `"`,
-		"&#39;", "'",
-		"&nbsp;", " ",
-		"&mdash;", "—",
-		"&ndash;", "–",
-		"&hellip;", "…",
-	)
-	return replacer.Replace(s)
-}

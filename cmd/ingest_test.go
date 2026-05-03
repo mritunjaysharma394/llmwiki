@@ -1,50 +1,12 @@
 package cmd
 
 import (
-	"strings"
+	"sort"
 	"testing"
+
+	"github.com/mritunjaysharma394/llmwiki/internal/db"
+	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
 )
-
-func TestChunkContentSmallReturnsSingle(t *testing.T) {
-	got := chunkContent("hello world", 100)
-	if len(got) != 1 || got[0] != "hello world" {
-		t.Errorf("got %q", got)
-	}
-}
-
-func TestChunkContentEmpty(t *testing.T) {
-	got := chunkContent("", 100)
-	if len(got) != 1 || got[0] != "" {
-		t.Errorf("got %q", got)
-	}
-}
-
-func TestChunkContentSplitsAtNewline(t *testing.T) {
-	src := "aaaa\nbbbb\ncccc\ndddd\n"
-	got := chunkContent(src, 10)
-	if len(got) < 2 {
-		t.Fatalf("got %d chunks", len(got))
-	}
-	for i, c := range got[:len(got)-1] {
-		if !strings.HasSuffix(c, "\n") {
-			t.Errorf("chunk %d does not end at newline: %q", i, c)
-		}
-	}
-	if strings.Join(got, "") != src {
-		t.Errorf("reassembly mismatch")
-	}
-}
-
-func TestChunkContentNoCapAt16k(t *testing.T) {
-	src := strings.Repeat("a\n", 25000)
-	got := chunkContent(src, 16*1024)
-	if len(got) < 3 {
-		t.Errorf("expected ≥3 chunks at 16k, got %d", len(got))
-	}
-	if strings.Join(got, "") != src {
-		t.Errorf("reassembly mismatch")
-	}
-}
 
 func TestSlugifyForArchive(t *testing.T) {
 	tests := []struct{ in, want string }{
@@ -57,5 +19,88 @@ func TestSlugifyForArchive(t *testing.T) {
 		if got := slugify(tc.in); got != tc.want {
 			t.Errorf("slugify(%q) = %q want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestPartitionByFileHash(t *testing.T) {
+	incoming := []ingest.SourceFile{
+		ingest.NewSourceFile("unchanged.go", []byte("u\n")),
+		ingest.NewSourceFile("changed.go", []byte("new\n")),
+		ingest.NewSourceFile("new.go", []byte("n\n")),
+	}
+	existing := map[string]db.SourceFile{
+		"unchanged.go": {RelativePath: "unchanged.go", ContentHash: incoming[0].ContentHash},
+		"changed.go":   {RelativePath: "changed.go", ContentHash: "old"},
+		"gone.go":      {RelativePath: "gone.go", ContentHash: "irrelevant"},
+	}
+	p := partitionByFileHash(incoming, existing)
+	if len(p.unchanged) != 1 || p.unchanged[0].RelativePath != "unchanged.go" {
+		t.Errorf("unchanged = %v", p.unchanged)
+	}
+	if len(p.changed) != 1 || p.changed[0].RelativePath != "changed.go" {
+		t.Errorf("changed = %v", p.changed)
+	}
+	if len(p.newFiles) != 1 || p.newFiles[0].RelativePath != "new.go" {
+		t.Errorf("new = %v", p.newFiles)
+	}
+	if len(p.gone) != 1 || p.gone[0].RelativePath != "gone.go" {
+		t.Errorf("gone = %v", p.gone)
+	}
+}
+
+func TestPartitionByFileHashEmptyExisting(t *testing.T) {
+	incoming := []ingest.SourceFile{
+		ingest.NewSourceFile("a.md", []byte("a")),
+		ingest.NewSourceFile("b.md", []byte("b")),
+	}
+	p := partitionByFileHash(incoming, map[string]db.SourceFile{})
+	if len(p.newFiles) != 2 {
+		t.Errorf("expected 2 new files, got %d", len(p.newFiles))
+	}
+	if len(p.unchanged) != 0 || len(p.changed) != 0 || len(p.gone) != 0 {
+		t.Errorf("expected only newFiles populated, got %+v", p)
+	}
+}
+
+func TestComputeWholeHashOrderIndependent(t *testing.T) {
+	a := []ingest.SourceFile{
+		ingest.NewSourceFile("a.md", []byte("x")),
+		ingest.NewSourceFile("b.md", []byte("y")),
+	}
+	b := []ingest.SourceFile{a[1], a[0]}
+	if computeWholeHash(a) != computeWholeHash(b) {
+		t.Error("computeWholeHash should be order-independent")
+	}
+}
+
+func TestComputeWholeHashChangesWithContent(t *testing.T) {
+	a := []ingest.SourceFile{
+		ingest.NewSourceFile("a.md", []byte("x")),
+		ingest.NewSourceFile("b.md", []byte("y")),
+	}
+	c := []ingest.SourceFile{
+		ingest.NewSourceFile("a.md", []byte("x")),
+		ingest.NewSourceFile("b.md", []byte("Y")),
+	}
+	if computeWholeHash(a) == computeWholeHash(c) {
+		t.Error("computeWholeHash should change when any file content changes")
+	}
+}
+
+// sanity assertion: paths in `gone` are returned in arbitrary order; tests
+// shouldn't depend on map iteration order.
+func TestPartitionGoneSortable(t *testing.T) {
+	existing := map[string]db.SourceFile{
+		"z": {RelativePath: "z", ContentHash: "z"},
+		"a": {RelativePath: "a", ContentHash: "a"},
+	}
+	p := partitionByFileHash(nil, existing)
+	paths := make([]string, len(p.gone))
+	for i, g := range p.gone {
+		paths[i] = g.RelativePath
+	}
+	sort.Strings(paths)
+	if len(paths) != 2 || paths[0] != "a" || paths[1] != "z" {
+		t.Errorf("got %v", paths)
 	}
 }

@@ -24,22 +24,6 @@ func FetchGitHubFiles(repoURL string, opts WalkOptions) ([]SourceFile, error) {
 	return ReadLocalFiles(tmpDir, opts)
 }
 
-// FetchGitHub is the legacy single-string entry point still consumed by
-// cmd/ingest.go until the Phase G rewrite (Task 11). It now delegates to the
-// unified walker via FetchGitHubFiles and flattens the result with the
-// "=== path ===" framing the orchestrator expects.
-func FetchGitHub(repoURL string) (string, error) {
-	files, err := FetchGitHubFiles(repoURL, DefaultWalkOptions())
-	if err != nil {
-		return "", err
-	}
-	var sb strings.Builder
-	for _, f := range files {
-		fmt.Fprintf(&sb, "=== %s ===\n%s\n\n", f.RelativePath, f.Content)
-	}
-	return sb.String(), nil
-}
-
 func IsGitHubURL(s string) bool {
 	return strings.Contains(s, "github.com") && !strings.HasSuffix(s, ".git") ||
 		strings.HasSuffix(s, ".git")

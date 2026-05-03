@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
 	"github.com/mritunjaysharma394/llmwiki/internal/wiki"
 )
@@ -82,13 +83,16 @@ func TestIngestMultiChunk(t *testing.T) {
 	source := sb.String()
 
 	client := integrationClient(t, "ingest_multichunk")
-	chunks := chunkContent(source, ingestChunkSize)
+	files := []ingest.SourceFile{ingest.NewSourceFile("doc", []byte(source))}
+	chunks := ingest.ChunkSourceFiles(files, ingestChunkSize)
 	if len(chunks) < 3 {
 		t.Fatalf("expected ≥3 chunks, got %d", len(chunks))
 	}
 	var allPages []wiki.Page
 	for i, c := range chunks {
-		pages, err := wiki.IngestToPages(context.Background(), client, c, nil)
+		// Use the legacy string-based wrapper so this test continues to replay
+		// against sub-project 1 cassettes recorded before the multi-file rewrite.
+		pages, err := wiki.IngestToPages(context.Background(), client, c.Text, nil)
 		if err != nil {
 			t.Fatalf("chunk %d: %v", i, err)
 		}

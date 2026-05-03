@@ -10,6 +10,24 @@ import (
 	gitignore "github.com/sabhiram/go-gitignore"
 )
 
+// isText returns false when the first 512 bytes contain a NUL byte,
+// matching the heuristic used by `file(1)` and most text-vs-binary checks.
+func isText(data []byte) bool {
+	if len(data) == 0 {
+		return true
+	}
+	check := data
+	if len(check) > 512 {
+		check = check[:512]
+	}
+	for _, b := range check {
+		if b == 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // Built-in directory denylist — never recurse into these.
 var denyDirs = map[string]bool{
 	".git": true, "node_modules": true, "vendor": true, "target": true,
