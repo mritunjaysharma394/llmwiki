@@ -28,8 +28,8 @@ func TestOpenCreatesEvidenceAndSavedAnswers(t *testing.T) {
 	if err := d.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("user_version: %v", err)
 	}
-	if version != 1 {
-		t.Errorf("user_version = %d, want 1", version)
+	if version != 2 {
+		t.Errorf("user_version = %d, want 2", version)
 	}
 }
 
@@ -50,8 +50,8 @@ func TestOpenIsIdempotent(t *testing.T) {
 	if err := d2.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("user_version: %v", err)
 	}
-	if version != 1 {
-		t.Errorf("user_version after re-open = %d, want 1", version)
+	if version != 2 {
+		t.Errorf("user_version after re-open = %d, want 2", version)
 	}
 }
 
@@ -75,8 +75,98 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 	defer d2.Close()
 	var version int
 	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&version)
-	if version != 1 {
-		t.Errorf("user_version after upgrade = %d, want 1", version)
+	if version != 2 {
+		t.Errorf("user_version after upgrade = %d, want 2", version)
+	}
+}
+
+func TestOpenAtFreshV2(t *testing.T) {
+	d := mustOpen(t)
+	for _, table := range []string{"source_files"} {
+		var name string
+		err := d.sql.QueryRow(`SELECT name FROM sqlite_master WHERE name = ?`, table).Scan(&name)
+		if err != nil {
+			t.Errorf("table %q missing: %v", table, err)
+		}
+	}
+	// evidence.source_file_id column present?
+	rows, err := d.sql.Query(`PRAGMA table_info(evidence)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var hasCol bool
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt any
+		rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk)
+		if name == "source_file_id" {
+			hasCol = true
+		}
+	}
+	if !hasCol {
+		t.Error("evidence.source_file_id column missing")
+	}
+	var version int
+	d.sql.QueryRow(`PRAGMA user_version`).Scan(&version)
+	if version != 2 {
+		t.Errorf("user_version = %d, want 2", version)
+	}
+}
+
+func TestOpenUpgradesV1ToV2(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wiki.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Force back to v1 state.
+	d.sql.Exec(`DROP TABLE source_files`)
+	// Drop the new column by recreating evidence without it.
+	d.sql.Exec(`PRAGMA user_version = 1`)
+	d.Close()
+
+	d2, err := Open(path)
+	if err != nil {
+		t.Fatalf("re-open: %v", err)
+	}
+	defer d2.Close()
+	var v int
+	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v)
+	if v != 2 {
+		t.Errorf("user_version after upgrade = %d, want 2", v)
+	}
+	var name string
+	if err := d2.sql.QueryRow(`SELECT name FROM sqlite_master WHERE name = 'source_files'`).Scan(&name); err != nil {
+		t.Errorf("source_files not recreated on upgrade: %v", err)
+	}
+}
+
+func TestOpenUpgradesLegacyV0ToV2(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wiki.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tbl := range []string{"source_files", "evidence_fts", "evidence", "saved_answers_fts", "saved_answers"} {
+		d.sql.Exec(`DROP TABLE ` + tbl)
+	}
+	d.sql.Exec(`PRAGMA user_version = 0`)
+	d.Close()
+
+	d2, err := Open(path)
+	if err != nil {
+		t.Fatalf("re-open: %v", err)
+	}
+	defer d2.Close()
+	var v int
+	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v)
+	if v != 2 {
+		t.Errorf("user_version after v0->v2 upgrade = %d, want 2", v)
 	}
 }
 

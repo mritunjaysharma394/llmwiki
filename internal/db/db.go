@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -110,6 +111,35 @@ func (d *DB) migrate() error {
 		for _, stmt := range v1 {
 			if _, err := d.sql.Exec(stmt); err != nil {
 				return fmt.Errorf("v1 migration %q: %w", stmt[:min(50, len(stmt))], err)
+			}
+		}
+	}
+
+	if version < 2 {
+		v2 := []string{
+			`CREATE TABLE IF NOT EXISTS source_files (
+				id INTEGER PRIMARY KEY,
+				source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+				relative_path TEXT NOT NULL,
+				content_hash TEXT NOT NULL,
+				byte_size INTEGER NOT NULL,
+				line_count INTEGER NOT NULL,
+				ingested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+				UNIQUE(source_id, relative_path)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_source_files_source ON source_files(source_id)`,
+			// ALTER TABLE ADD COLUMN is idempotent-friendly via a check.
+			`ALTER TABLE evidence ADD COLUMN source_file_id INTEGER REFERENCES source_files(id) ON DELETE CASCADE`,
+			`CREATE INDEX IF NOT EXISTS idx_evidence_source_file ON evidence(source_file_id)`,
+			`PRAGMA user_version = 2`,
+		}
+		for _, stmt := range v2 {
+			if _, err := d.sql.Exec(stmt); err != nil {
+				// ALTER TABLE ADD COLUMN errors with "duplicate column" if re-run on a
+				// half-migrated db; tolerate that one specific error and keep going.
+				if !strings.Contains(err.Error(), "duplicate column") {
+					return fmt.Errorf("v2 migration %q: %w", stmt[:min(50, len(stmt))], err)
+				}
 			}
 		}
 	}
