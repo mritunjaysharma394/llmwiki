@@ -20,8 +20,8 @@ This sub-project is about turning a working binary into a shipped tool: licensed
 ## Goals
 
 1. **Versioned, releasable binary.** `llmwiki version` prints a real version. `User-Agent` carries it. `go install` works from a tagged release. GoReleaser publishes Linux/macOS/Windows binaries on tag push.
-2. **A README that earns trust in 60 seconds.** Clear what-it-is, install instructions for the three real install paths (`go install`, `brew`-no-tap-but-binary-download, `make install`), an asciinema/screencap of one ingest+ask round trip, the trust property stated up front, and links to the design specs.
-3. **A LICENSE and a CHANGELOG.** MIT (or Apache-2.0; see open question) at the repo root. CHANGELOG follows Keep-a-Changelog, populated retroactively for sub-projects 1, 3, 4.
+2. **A README that earns trust in 60 seconds.** Clear what-it-is, install instructions for the three real install paths (`go install`, `brew`-no-tap-but-binary-download, `make install`), a static screenshot of one ingest+ask round trip, the trust property stated up front, and links to the design specs.
+3. **A LICENSE and a CHANGELOG.** Apache-2.0 at the repo root. CHANGELOG follows Keep-a-Changelog, populated retroactively for sub-projects 1, 3, 4.
 4. **One coherent ingestion expansion: feed-shaped sources.** RSS/Atom feeds + sitemap.xml crawling, layered on top of sub-project 3's URL+HTML pipeline. This covers the "I want to keep my wiki current with a blog/changelog/news source" use case that the deferred Twitter/Slack/Gmail/Notion list was gesturing at, without per-source OAuth.
 5. **Re-chunking on file-boundary changes.** Honor the punted item from sub-project 3: when an existing file grows enough to spill into a new chunk, neighbour chunks that share its content get re-processed too, so quotes don't end up orphaned by the chunker's bin-packing decisions.
 6. **Nightly cassette refresh in CI.** Scheduled GitHub Actions job runs `LLMWIKI_RECORD=1 go test ./...` against a real `ANTHROPIC_API_KEY` secret on a cron, opens a PR with the cassette diff if anything changed. We see API drift the morning it happens, not the day a contributor's PR fails for unrelated reasons.
@@ -82,7 +82,7 @@ The CLI itself gains:
 The README, top-to-bottom:
 
 1. One-paragraph what-it-is + the trust property in plain English.
-2. A 30-second asciicast (committed as a `.cast` file, embedded via the asciinema GH-pages player or just linked).
+2. A static screenshot (committed under `docs/assets/`) of one ingest+ask round trip.
 3. Install: `go install`, prebuilt binaries, `make install` from source.
 4. Quickstart (3 commands).
 5. Common workflows: ingest a repo, ingest a folder of PDFs, subscribe to a feed.
@@ -247,13 +247,13 @@ GitHub Release notes are auto-populated from the CHANGELOG entry for the tag.
 
 - **0.1.0** — sub-project 1 (trust the output): evidence validation, FTS5 over evidence, streaming ask, auto-archive.
 - **0.2.0** — sub-project 3 (real-world ingestion): PDFs, URL article extraction, repo walker, per-file dedup.
-- **1.0.0** — sub-project 4 (this one): feed/sitemap, re-chunking, version flag, GoReleaser, polished errors, license, README.
+- **1.0.0-rc.1** — sub-project 4 (this one): feed/sitemap, re-chunking, version flag, GoReleaser, polished errors, license, README. (Real `v1.0.0` is the post-launch promotion.)
 
 The 0.1.0 / 0.2.0 entries are written in past tense; we're not actually tagging old commits, just recording what shipped between them. The 1.0.0 entry is the launch.
 
 ### LICENSE
 
-MIT (open question below). One file at repo root, copy of the standard text with copyright line "Copyright (c) 2026 Mritunjay Sharma".
+Apache-2.0 (resolved). Full standard text at repo root with copyright line "Copyright 2026 Mritunjay Sharma".
 
 ### Nightly cassette refresh (`.github/workflows/cassette-refresh.yml`)
 
@@ -287,16 +287,16 @@ A clean run produces no diff, no PR. Any drift opens a PR with the cassette delt
 - `userAgentVersion = "0.1"` becomes `version.Version` — sites that filter on the literal `"llmwiki/0.1"` substring see `"llmwiki/1.0.0"` after the release. Acceptable (we don't know of any such site, and substring filters that strict on dev-tier UAs are anyway rare).
 - Pre-existing answers in `.llmwiki/answers/` are untouched. The auto-archive format from sub-project 1 stays.
 
-## Open questions
+## Resolved questions
 
-These need user input before plan-pass:
+The user closed each open question on 2026-05-04, before plan-pass. Decisions:
 
-1. **MIT vs Apache-2.0 vs BSD-3 for LICENSE.** MIT is the path of least resistance and matches the dependency profile (most deps are MIT-licensed). Apache-2.0 adds an explicit patent grant, which matters more for libraries than CLIs. Recommendation: **MIT**. Confirm.
-2. **Tag name for the launch.** `v1.0.0`? Or `v0.3.0` / `v1.0.0-rc.1` first, with v1.0.0 reserved for "I've used it for a month and nothing exploded"? Recommendation: **v1.0.0-rc.1 first**, promote to v1.0.0 after a stability window. Confirm.
-3. **Module path stability.** `github.com/mritunjaysharma394/llmwiki` is the current path. Once we tag v1.0, we own that path forever for `go install` users. Move it to a personal-domain or org alias before launch, or commit to the username path? Recommendation: **commit to the username path**, it's already in `go.mod` and the GitHub URL.
-4. **Chainguard email vs gmail in `git config`.** Local repo identity is `mritunjaysharma394@gmail.com`; the user's spec-context email is `mritunjay.sharma@chainguard.dev`. Out of scope to touch in this spec, but flag for the user: which identity should the launch commit and the LICENSE copyright line use?
-5. **Asciinema vs static screenshot in README.** Asciinema is the right format (copyable, scrubbable, lightweight) but adds a new asset workflow. A static `screenshot.png` from `glamour`-rendered output is one commit. Recommendation: **screenshot for v1.0**, asciicast post-launch if there's appetite.
-6. **`brew install` story.** A personal Homebrew tap (`brew install mritunjaysharma394/tap/llmwiki`) is two extra files in a separate repo and zero ongoing maintenance via GoReleaser. Worth doing now or post-launch? Recommendation: **post-launch** — non-blocking and we'll know better if it matters.
+1. **License: Apache-2.0.** A `LICENSE` file at the repo root carries the full Apache-2.0 text and the copyright line `Copyright 2026 Mritunjay Sharma`.
+2. **First tag: `v1.0.0-rc.1`.** GoReleaser config and the release commit target this tag. Real `v1.0.0` is a post-launch follow-up, contingent on a stability window of real-world use; out of scope for this sub-project.
+3. **Module path stays `github.com/mritunjaysharma394/llmwiki`.** This remains a personal project; no org migration. Once tagged, the path is owned forever for `go install` users.
+4. **Git identity: personal email only.** The repo's local `user.email` is already `mritunjaysharma394@gmail.com` and is not touched. No file shipped in this sub-project (LICENSE, README, CHANGELOG, plan, spec, or any commit) references the chainguard.dev address.
+5. **README demo: static GIF/screenshot** committed under `docs/assets/`. No asciinema dependency. Recording the asset itself is a manual user step; the plan leaves it as a flagged TODO with a placeholder asset path so the README still parses while the file is missing.
+6. **Homebrew tap: out of scope.** Defer to post-launch. GoReleaser's GitHub Releases artifacts cover the same install need without a separate tap repo or its ongoing maintenance.
 
 ## Risks
 
@@ -345,11 +345,11 @@ Plan-pass refines. Rough sequence:
 5. **`internal/ingest/feed.go`** + `internal/ingest/sitemap.go` — fetcher, parser, content-type dispatch from `url.go`. New CLI flags + config keys.
 6. **`make smoke`** target + smoke cassette + CI step.
 7. **GoReleaser config** + dry-run CI step.
-8. **CHANGELOG** retroactive entries (0.1.0, 0.2.0) + 1.0.0 stub.
+8. **CHANGELOG** retroactive entries (0.1.0, 0.2.0) + 1.0.0-rc.1 stub.
 9. **LICENSE** at repo root.
 10. **Nightly cassette-refresh workflow.**
 11. **README rewrite** — last, verifies everything claimed.
-12. **Tag v1.0.0-rc.1**, run manual verification (next section), promote to v1.0.0 after a stability window.
+12. **Tag v1.0.0-rc.1** locally (no push), run manual verification (next section). Promotion to v1.0.0 is a post-launch follow-up after a stability window.
 
 ## Verification
 
