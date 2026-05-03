@@ -1,0 +1,59 @@
+version: 2
+
+project_name: llmwiki
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: llmwiki
+    main: ./
+    binary: llmwiki
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X github.com/mritunjaysharma394/llmwiki/internal/version.Version={{.Version}}
+      - -X github.com/mritunjaysharma394/llmwiki/internal/version.Commit={{.ShortCommit}}
+      - -X github.com/mritunjaysharma394/llmwiki/internal/version.BuildDate={{.Date}}
+
+archives:
+  - id: default
+    name_template: "{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}"
+    formats: ["tar.gz"]
+    format_overrides:
+      - goos: windows
+        formats: ["zip"]
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
+
+changelog:
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  draft: false
+  prerelease: auto
