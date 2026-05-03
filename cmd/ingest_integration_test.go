@@ -84,7 +84,7 @@ func TestIngestMultiChunk(t *testing.T) {
 
 	client := integrationClient(t, "ingest_multichunk")
 	files := []ingest.SourceFile{ingest.NewSourceFile("doc", []byte(source))}
-	chunks := ingest.ChunkSourceFiles(files, ingestChunkSize)
+	chunks := ingest.ChunkSourceFiles(files, 16*1024)
 	if len(chunks) < 3 {
 		t.Fatalf("expected ≥3 chunks, got %d", len(chunks))
 	}

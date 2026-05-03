@@ -110,7 +110,7 @@ func TestBuildIngestOptionsAppliesFlags(t *testing.T) {
 		cmd.Flags().Set("force", "false")
 	})
 
-	walk, _ := buildIngestOptions(cmd)
+	walk, _ := buildIngestOptions(cmd, nil)
 	if walk.MaxFileBytes != 1024 {
 		t.Errorf("MaxFileBytes = %d", walk.MaxFileBytes)
 	}
@@ -125,6 +125,69 @@ func TestBuildIngestOptionsAppliesFlags(t *testing.T) {
 	}
 	if !forceFlag(cmd) {
 		t.Error("--force not propagated")
+	}
+}
+
+// TestBuildIngestOptionsAppliesConfigDefaults verifies that values from the
+// [ingest] config block flow into WalkOptions / URLOptions when no flags
+// override them.
+func TestBuildIngestOptionsAppliesConfigDefaults(t *testing.T) {
+	cmd := ingestCmd
+	t.Cleanup(func() {
+		cmd.Flags().Set("max-file-bytes", "0")
+		cmd.Flags().Set("exclude", "")
+		cmd.Flags().Set("include", "")
+		cmd.Flags().Set("no-gitignore", "false")
+		cmd.Flags().Set("force", "false")
+	})
+	// reset to clean state in case other tests left flags set
+	cmd.Flags().Set("max-file-bytes", "0")
+	cmd.Flags().Set("exclude", "")
+	cmd.Flags().Set("include", "")
+	cmd.Flags().Set("no-gitignore", "false")
+
+	f := false
+	c := &Config{
+		Ingest: IngestConfig{
+			MaxFileBytes:       2048,
+			HTTPTimeoutSeconds: 7,
+			HTTPMaxBytes:       1024 * 1024,
+			ExtraSkipGlobs:     []string{"*.log"},
+			RespectGitignore:   &f,
+		},
+	}
+	walk, urlOpts := buildIngestOptions(cmd, c)
+	if walk.MaxFileBytes != 2048 {
+		t.Errorf("MaxFileBytes from config = %d, want 2048", walk.MaxFileBytes)
+	}
+	if walk.RespectGitignore {
+		t.Error("RespectGitignore from config (false) not applied")
+	}
+	if len(walk.ExtraSkipGlobs) != 1 || walk.ExtraSkipGlobs[0] != "*.log" {
+		t.Errorf("ExtraSkipGlobs from config = %v", walk.ExtraSkipGlobs)
+	}
+	if urlOpts.Timeout.Seconds() != 7 {
+		t.Errorf("urlOpts.Timeout = %v, want 7s", urlOpts.Timeout)
+	}
+	if urlOpts.MaxBodyBytes != 1024*1024 {
+		t.Errorf("urlOpts.MaxBodyBytes = %d", urlOpts.MaxBodyBytes)
+	}
+}
+
+// TestBuildIngestOptionsFlagsOverrideConfig confirms that explicit CLI flags
+// win over [ingest] config values, regardless of which the user set first.
+func TestBuildIngestOptionsFlagsOverrideConfig(t *testing.T) {
+	cmd := ingestCmd
+	if err := cmd.ParseFlags([]string{"--max-file-bytes", "9999"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cmd.Flags().Set("max-file-bytes", "0")
+	})
+	c := &Config{Ingest: IngestConfig{MaxFileBytes: 1}}
+	walk, _ := buildIngestOptions(cmd, c)
+	if walk.MaxFileBytes != 9999 {
+		t.Errorf("flag override = %d, want 9999", walk.MaxFileBytes)
 	}
 }
 

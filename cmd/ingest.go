@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
@@ -15,10 +16,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const (
-	ingestChunkSize   = 16 * 1024
-	ingestMaxInflight = 5
-)
+const ingestMaxInflight = 5
 
 var ingestCmd = &cobra.Command{
 	Use:   "ingest <source>",
@@ -36,12 +34,31 @@ func init() {
 }
 
 // buildIngestOptions resolves the runtime walker / URL fetcher options for
-// `ingest`. Defaults come from the ingest package; explicit CLI flags
-// override the defaults. Phase H (Task 13) will weave a [ingest] config block
-// in between defaults and flags; for now flags override defaults directly.
-func buildIngestOptions(cmd *cobra.Command) (ingest.WalkOptions, ingest.URLOptions) {
+// `ingest`. Layering goes: package defaults -> [ingest] config block ->
+// explicit CLI flags. CLI flags always win when set; the [ingest] block lets
+// users persist project-wide preferences without touching code.
+func buildIngestOptions(cmd *cobra.Command, c *Config) (ingest.WalkOptions, ingest.URLOptions) {
 	walk := ingest.DefaultWalkOptions()
 	urlOpts := ingest.DefaultURLOptions()
+
+	if c != nil {
+		if c.Ingest.MaxFileBytes > 0 {
+			walk.MaxFileBytes = c.Ingest.MaxFileBytes
+		}
+		if len(c.Ingest.ExtraTextExtensions) > 0 {
+			walk.ExtraTextExtensions = append(walk.ExtraTextExtensions, c.Ingest.ExtraTextExtensions...)
+		}
+		if len(c.Ingest.ExtraSkipGlobs) > 0 {
+			walk.ExtraSkipGlobs = append(walk.ExtraSkipGlobs, c.Ingest.ExtraSkipGlobs...)
+		}
+		walk.RespectGitignore = c.Ingest.RespectGitignoreOrDefault()
+		if c.Ingest.HTTPTimeoutSeconds > 0 {
+			urlOpts.Timeout = time.Duration(c.Ingest.HTTPTimeoutSeconds) * time.Second
+		}
+		if c.Ingest.HTTPMaxBytes > 0 {
+			urlOpts.MaxBodyBytes = c.Ingest.HTTPMaxBytes
+		}
+	}
 
 	if v, _ := cmd.Flags().GetInt64("max-file-bytes"); v > 0 {
 		walk.MaxFileBytes = v
@@ -143,7 +160,7 @@ func runIngest(cmd *cobra.Command, args []string) error {
 	source := args[0]
 	ctx := cmd.Context()
 
-	walkOpts, urlOpts := buildIngestOptions(cmd)
+	walkOpts, urlOpts := buildIngestOptions(cmd, cfg)
 
 	var sourceFiles []ingest.SourceFile
 	var err error
@@ -218,7 +235,11 @@ func runIngest(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	chunks := ingest.ChunkSourceFiles(toIngest, ingestChunkSize)
+	chunkSize := 16 * 1024
+	if cfg != nil && cfg.Ingest.ChunkSizeBytes > 0 {
+		chunkSize = cfg.Ingest.ChunkSizeBytes
+	}
+	chunks := ingest.ChunkSourceFiles(toIngest, chunkSize)
 	if len(chunks) > 1 {
 		fmt.Printf("  Packing into %d chunks (max %d in flight)\n", len(chunks), ingestMaxInflight)
 	}

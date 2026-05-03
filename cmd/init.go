@@ -20,6 +20,16 @@ db_path  = ".llmwiki/wiki.db"
 
 [ask]
 auto_save = true
+
+[ingest]
+max_file_bytes = 262144
+chunk_size_bytes = 16384
+http_timeout_seconds = 30
+http_max_bytes = 5242880
+pdf_min_text_per_page = 50
+extra_text_extensions = []
+extra_skip_globs = []
+respect_gitignore = true
 `
 
 const defaultConfigOllamaToml = `[llm]
@@ -34,6 +44,16 @@ db_path  = ".llmwiki/wiki.db"
 
 [ask]
 auto_save = true
+
+[ingest]
+max_file_bytes = 262144
+chunk_size_bytes = 16384
+http_timeout_seconds = 30
+http_max_bytes = 5242880
+pdf_min_text_per_page = 50
+extra_text_extensions = []
+extra_skip_globs = []
+respect_gitignore = true
 `
 
 var initCmd = &cobra.Command{

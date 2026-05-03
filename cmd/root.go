@@ -27,10 +27,37 @@ type AskConfig struct {
 	AutoSave *bool `toml:"auto_save"`
 }
 
+// IngestConfig controls ingest defaults that callers can override via flags.
+// Defaults are applied silently in loadConfig when fields are zero-valued, so
+// pre-sub-project-3 wikis without a [ingest] block keep working.
+type IngestConfig struct {
+	MaxFileBytes        int64    `toml:"max_file_bytes"`
+	ChunkSizeBytes      int      `toml:"chunk_size_bytes"`
+	HTTPTimeoutSeconds  int      `toml:"http_timeout_seconds"`
+	HTTPMaxBytes        int64    `toml:"http_max_bytes"`
+	PDFMinTextPerPage   int      `toml:"pdf_min_text_per_page"`
+	ExtraTextExtensions []string `toml:"extra_text_extensions"`
+	ExtraSkipGlobs      []string `toml:"extra_skip_globs"`
+	// RespectGitignore is a *bool so we can disambiguate "missing from config"
+	// (-> default true) from "explicitly set to false". TOML's zero value for
+	// bool is false, which is the wrong default for an absent block.
+	RespectGitignore *bool `toml:"respect_gitignore"`
+}
+
 type Config struct {
-	LLM  LLMConfig  `toml:"llm"`
-	Wiki WikiConfig `toml:"wiki"`
-	Ask  AskConfig  `toml:"ask"`
+	LLM    LLMConfig    `toml:"llm"`
+	Wiki   WikiConfig   `toml:"wiki"`
+	Ask    AskConfig    `toml:"ask"`
+	Ingest IngestConfig `toml:"ingest"`
+}
+
+// RespectGitignoreOrDefault returns the configured value, defaulting to true
+// when the config left it unset.
+func (c IngestConfig) RespectGitignoreOrDefault() bool {
+	if c.RespectGitignore == nil {
+		return true
+	}
+	return *c.RespectGitignore
 }
 
 var (
@@ -74,6 +101,7 @@ func loadConfig() error {
 	if cfg.LLM.OllamaURL == "" {
 		cfg.LLM.OllamaURL = "http://localhost:11434"
 	}
+	applyIngestDefaults(&cfg.Ingest)
 	var err error
 	database, err = db.Open(cfg.Wiki.DBPath)
 	if err != nil {
@@ -94,6 +122,31 @@ func loadConfig() error {
 		return fmt.Errorf("unknown provider %q", cfg.LLM.Provider)
 	}
 	return nil
+}
+
+// applyIngestDefaults fills zero-valued IngestConfig fields with their default
+// values. Pre-v3 configs without a [ingest] block decode into a zero struct; we
+// silently apply the same defaults the v3 init template would have written.
+func applyIngestDefaults(c *IngestConfig) {
+	if c.MaxFileBytes == 0 {
+		c.MaxFileBytes = 256 * 1024
+	}
+	if c.ChunkSizeBytes == 0 {
+		c.ChunkSizeBytes = 16 * 1024
+	}
+	if c.HTTPTimeoutSeconds == 0 {
+		c.HTTPTimeoutSeconds = 30
+	}
+	if c.HTTPMaxBytes == 0 {
+		c.HTTPMaxBytes = 5 * 1024 * 1024
+	}
+	if c.PDFMinTextPerPage == 0 {
+		c.PDFMinTextPerPage = 50
+	}
+	if c.RespectGitignore == nil {
+		t := true
+		c.RespectGitignore = &t
+	}
 }
 
 func init() {
