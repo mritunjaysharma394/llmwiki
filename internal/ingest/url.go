@@ -1,13 +1,23 @@
 package ingest
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
+
+	htmltomd "github.com/JohannesKaufmann/html-to-markdown/v2"
+	readability "github.com/go-shiori/go-readability"
 )
+
+const userAgentVersion = "0.1"
 
 var (
 	reTag      = regexp.MustCompile(`(?s)<[^>]*>`)
@@ -17,14 +27,141 @@ var (
 	reNewlines = regexp.MustCompile(`\n{3,}`)
 )
 
-func FetchURL(url string) (string, error) {
-	resp, err := http.Get(url)
+// URLOptions tunes the URL fetcher used by FetchURLFiles.
+//
+// Defaults come from DefaultURLOptions(): 30s timeout, 5 MB body cap, the
+// "llmwiki/<version>" user agent, and the standard library's net/http client
+// (which by default follows up to 10 redirects). Tests can inject a custom
+// HTTPClient to capture or stub network behavior.
+type URLOptions struct {
+	Timeout      time.Duration
+	MaxBodyBytes int64
+	UserAgent    string
+	HTTPClient   *http.Client
+}
+
+// DefaultURLOptions returns the standard URL fetcher configuration.
+func DefaultURLOptions() URLOptions {
+	return URLOptions{
+		Timeout:      30 * time.Second,
+		MaxBodyBytes: 5 * 1024 * 1024,
+		UserAgent:    "llmwiki/" + userAgentVersion,
+	}
+}
+
+// FetchURLFiles fetches a URL and dispatches by content-type, returning one or
+// more SourceFile values for the ingest pipeline:
+//
+//	application/pdf  (or .pdf path) -> ReadPDF on a temp file, one SourceFile per page ("page-N")
+//	text/html, application/xhtml+xml -> Readability article extraction + html-to-markdown,
+//	                                    one SourceFile with RelativePath "index.html"
+//	other text/*                    -> raw passthrough as one SourceFile ("body.txt")
+//	anything else                   -> error
+//
+// Body size is capped at opts.MaxBodyBytes via io.LimitReader. Status codes
+// >= 400 produce an error.
+func FetchURLFiles(rawURL string, opts URLOptions) ([]SourceFile, error) {
+	if opts.Timeout == 0 {
+		opts.Timeout = 30 * time.Second
+	}
+	if opts.MaxBodyBytes == 0 {
+		opts.MaxBodyBytes = 5 * 1024 * 1024
+	}
+	if opts.UserAgent == "" {
+		opts.UserAgent = "llmwiki/" + userAgentVersion
+	}
+	client := opts.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: opts.Timeout}
+	}
+
+	req, err := http.NewRequest("GET", rawURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("fetching %s: %w", url, err)
+		return nil, fmt.Errorf("building request: %w", err)
+	}
+	req.Header.Set("User-Agent", opts.UserAgent)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetching %s: %w", rawURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("HTTP %d fetching %s", resp.StatusCode, url)
+		return nil, fmt.Errorf("HTTP %d fetching %s", resp.StatusCode, rawURL)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, opts.MaxBodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("reading body: %w", err)
+	}
+
+	ct := strings.SplitN(resp.Header.Get("Content-Type"), ";", 2)[0]
+	ct = strings.TrimSpace(strings.ToLower(ct))
+	parsed, _ := url.Parse(rawURL)
+	extLower := ""
+	if parsed != nil {
+		extLower = strings.ToLower(filepath.Ext(parsed.Path))
+	}
+
+	switch {
+	case ct == "application/pdf" || extLower == ".pdf":
+		return fetchPDFViaTempFile(body)
+	case ct == "text/html", ct == "application/xhtml+xml":
+		return fetchHTMLAsMarkdown(body, rawURL)
+	case strings.HasPrefix(ct, "text/"):
+		return []SourceFile{NewSourceFile("body.txt", body)}, nil
+	default:
+		return nil, fmt.Errorf("unsupported content-type %q for URL ingestion", ct)
+	}
+}
+
+func fetchPDFViaTempFile(body []byte) ([]SourceFile, error) {
+	tmp, err := os.CreateTemp("", "llmwiki-url-*.pdf")
+	if err != nil {
+		return nil, fmt.Errorf("temp pdf: %w", err)
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(body); err != nil {
+		tmp.Close()
+		return nil, fmt.Errorf("writing temp pdf: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, fmt.Errorf("closing temp pdf: %w", err)
+	}
+	return ReadPDF(tmp.Name())
+}
+
+func fetchHTMLAsMarkdown(body []byte, srcURL string) ([]SourceFile, error) {
+	parsed, _ := url.Parse(srcURL)
+	article, err := readability.FromReader(bytes.NewReader(body), parsed)
+	var html string
+	if err == nil && strings.TrimSpace(article.Content) != "" {
+		html = article.Content
+	} else {
+		// Fallback: pass full body through html-to-markdown which strips
+		// <script>/<style>/<nav>/<footer>/<aside>/<header> by default rules.
+		html = string(body)
+	}
+	md, err := htmltomd.ConvertString(html)
+	if err != nil {
+		return nil, fmt.Errorf("html→markdown: %w", err)
+	}
+	return []SourceFile{NewSourceFile("index.html", []byte(md))}, nil
+}
+
+// FetchURL is the legacy single-string fetcher kept for backward compatibility
+// with cmd/ingest.go until Task 11 rewires the caller. New code should use
+// FetchURLFiles.
+//
+// Deprecated: use FetchURLFiles.
+func FetchURL(rawURL string) (string, error) {
+	resp, err := http.Get(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("fetching %s: %w", rawURL, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("HTTP %d fetching %s", resp.StatusCode, rawURL)
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
