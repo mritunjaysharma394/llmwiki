@@ -267,8 +267,10 @@ func lineRange(source string, idx, n int) (int, int) {
 
 const answerSystemPrompt = `You answer using the provided wiki pages and source quotes.
 Cite pages inline using [Page Title] notation.
-When using a verbatim quote from a source, render it as a markdown blockquote and label the line range, e.g.:
-> "channels block when full" (lines 4-4)
+When using a verbatim quote from a source, render it as a markdown blockquote and label it as (file:lines), e.g.:
+> "channels block when full" (internal/sync/chan.go:4-4)
+For PDF pages the file becomes "page-N":
+> "the answer is 42" (page-3:2-2)
 
 If pages and quotes are insufficient, say so plainly. Do not fabricate.`
 
@@ -288,7 +290,7 @@ func buildAnswerUserPrompt(question string, pages []Page) string {
 		if len(p.Evidence) > 0 {
 			sb.WriteString("\n**Source quotes for this page:**\n")
 			for _, e := range p.Evidence {
-				sb.WriteString(fmt.Sprintf("> %q  (lines %d-%d)\n", e.Quote, e.LineStart, e.LineEnd))
+				sb.WriteString(fmt.Sprintf("> %q  (%s)\n", e.Quote, evidenceAnnotation(e)))
 			}
 		} else {
 			sb.WriteString("\n*(no source quotes attached — legacy page)*\n")
@@ -297,6 +299,17 @@ func buildAnswerUserPrompt(question string, pages []Page) string {
 	}
 	sb.WriteString(fmt.Sprintf("Question: %s", question))
 	return sb.String()
+}
+
+// evidenceAnnotation renders the parenthesized label for an evidence quote.
+// When the evidence carries a SourceFilePath (post-sub-project-3), the label
+// becomes "<path>:<a>-<b>"; otherwise the legacy "lines a-b" form is kept so
+// quotes from pre-v3 pages still render coherently.
+func evidenceAnnotation(e Evidence) string {
+	if e.SourceFilePath != "" {
+		return fmt.Sprintf("%s:%d-%d", e.SourceFilePath, e.LineStart, e.LineEnd)
+	}
+	return fmt.Sprintf("lines %d-%d", e.LineStart, e.LineEnd)
 }
 
 func keys(m map[string]any) []string {

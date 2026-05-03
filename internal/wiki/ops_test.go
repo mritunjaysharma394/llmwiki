@@ -274,9 +274,33 @@ func TestBuildAnswerPromptIncludesEvidence(t *testing.T) {
 		t.Error("prompt missing evidence quote")
 	}
 	if !strings.Contains(prompt, "(lines 4-4)") {
-		t.Error("prompt missing line range")
+		t.Error("prompt missing legacy line range when SourceFilePath empty")
 	}
 	if !strings.Contains(prompt, "Question: how do channels work?") {
 		t.Error("prompt missing question")
+	}
+}
+
+// TestBuildAnswerUserPromptIncludesSourceFile verifies the (file:a-b)
+// annotation when evidence carries a SourceFilePath, including the
+// "page-N:a-b" form used for PDF-derived evidence.
+func TestBuildAnswerUserPromptIncludesSourceFile(t *testing.T) {
+	pages := []Page{{
+		Title: "T",
+		Body:  "b",
+		Evidence: []Evidence{
+			{Quote: "abc", LineStart: 1, LineEnd: 1, SourceFilePath: "internal/db/db.go"},
+			{Quote: "xyz", LineStart: 2, LineEnd: 2, SourceFilePath: "page-3"},
+		},
+	}}
+	out := buildAnswerUserPrompt("q?", pages)
+	if !strings.Contains(out, "(internal/db/db.go:1-1)") {
+		t.Errorf("missing file annotation: %q", out)
+	}
+	if !strings.Contains(out, "(page-3:2-2)") {
+		t.Errorf("missing pdf page annotation: %q", out)
+	}
+	if strings.Contains(out, "(lines 1-1)") {
+		t.Errorf("legacy line annotation should not appear when SourceFilePath set: %q", out)
 	}
 }

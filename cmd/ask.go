@@ -15,6 +15,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// pageBundle pairs a page with the FTS-matched evidence rows that pulled it
+// into the answer context. Held in a small map keyed by page ID to dedup
+// pages that match both the page-level and evidence-level FTS searches.
+type pageBundle struct {
+	page     db.PageRecord
+	evidence []db.Evidence
+}
+
 var askCmd = &cobra.Command{
 	Use:   "ask <question>",
 	Short: "Ask a question and get an answer from your wiki",
@@ -42,10 +50,6 @@ func runAsk(cmd *cobra.Command, args []string) error {
 	}
 	evHits, _ := database.SearchEvidence(question, 10)
 
-	type pageBundle struct {
-		page     db.PageRecord
-		evidence []db.Evidence
-	}
 	bundles := map[int64]*pageBundle{}
 	var order []int64
 	for _, p := range pageHits {
@@ -82,17 +86,32 @@ func runAsk(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Resolve source_file_id -> relative_path once per ask, by gathering every
+	// source backing any candidate page. Built lazily so legacy pages without
+	// a source_file_id incur no DB hit beyond what they need.
+	sourceFilePaths := buildSourceFilePathLookup(order, bundles)
+
 	var pages []wiki.Page
 	for _, id := range order {
 		b := bundles[id]
 		var ev []wiki.Evidence
 		for _, e := range b.evidence {
-			ev = append(ev, wiki.Evidence{Quote: e.Quote, LineStart: e.LineStart, LineEnd: e.LineEnd})
+			ev = append(ev, wiki.Evidence{
+				Quote:          e.Quote,
+				LineStart:      e.LineStart,
+				LineEnd:        e.LineEnd,
+				SourceFilePath: pathForEvidence(e, sourceFilePaths),
+			})
 		}
 		if len(ev) == 0 {
 			dbEv, _ := database.GetEvidenceForPage(b.page.ID)
 			for _, e := range dbEv {
-				ev = append(ev, wiki.Evidence{Quote: e.Quote, LineStart: e.LineStart, LineEnd: e.LineEnd})
+				ev = append(ev, wiki.Evidence{
+					Quote:          e.Quote,
+					LineStart:      e.LineStart,
+					LineEnd:        e.LineEnd,
+					SourceFilePath: pathForEvidence(e, sourceFilePaths),
+				})
 				if len(ev) >= 3 {
 					break
 				}
@@ -160,6 +179,49 @@ func glamourStyle() string {
 	return "auto"
 }
 
+// buildSourceFilePathLookup walks every candidate page in `order`, collects
+// the union of their backing source IDs, and asks the DB for the source_files
+// rows under each. The returned map keys source_file row IDs to their
+// relative paths so evidence rendering can annotate quotes as "(path:a-b)".
+//
+// Done in cmd/ask.go (rather than via a JOIN in db.GetEvidenceForPage /
+// db.SearchEvidence) so the Phase A schema stays untouched.
+func buildSourceFilePathLookup(order []int64, bundles map[int64]*pageBundle) map[int64]string {
+	out := map[int64]string{}
+	seenSource := map[int64]bool{}
+	for _, id := range order {
+		b, ok := bundles[id]
+		if !ok {
+			continue
+		}
+		for _, sid := range b.page.SourceIDs {
+			if seenSource[sid] {
+				continue
+			}
+			seenSource[sid] = true
+			files, err := database.GetSourceFiles(sid)
+			if err != nil {
+				continue
+			}
+			for _, f := range files {
+				out[f.ID] = f.RelativePath
+			}
+		}
+	}
+	return out
+}
+
+// pathForEvidence resolves a db.Evidence row's SourceFileID to its relative
+// path via the prebuilt lookup. Returns "" when SourceFileID is nil (legacy
+// rows pre-dating the source_files table) so callers can fall back to the
+// "lines a-b" annotation.
+func pathForEvidence(e db.Evidence, lookup map[int64]string) string {
+	if e.SourceFileID == nil {
+		return ""
+	}
+	return lookup[*e.SourceFileID]
+}
+
 func printSources(pages []wiki.Page, isTTY bool) {
 	if len(pages) == 0 {
 		return
@@ -169,7 +231,11 @@ func printSources(pages []wiki.Page, isTTY bool) {
 	for i, p := range pages {
 		sb.WriteString(fmt.Sprintf("[%d] %s\n", i+1, p.Title))
 		for _, e := range p.Evidence {
-			sb.WriteString(fmt.Sprintf("    > %q  (lines %d-%d)\n", e.Quote, e.LineStart, e.LineEnd))
+			annotation := fmt.Sprintf("lines %d-%d", e.LineStart, e.LineEnd)
+			if e.SourceFilePath != "" {
+				annotation = fmt.Sprintf("%s:%d-%d", e.SourceFilePath, e.LineStart, e.LineEnd)
+			}
+			sb.WriteString(fmt.Sprintf("    > %q  (%s)\n", e.Quote, annotation))
 		}
 	}
 	out := sb.String()

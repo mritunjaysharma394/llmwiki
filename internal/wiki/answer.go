@@ -27,7 +27,7 @@ func FormatSavedAnswer(in SavedAnswerInput) string {
 	for i, p := range in.Pages {
 		sb.WriteString(fmt.Sprintf("**[%d] %s**\n\n", i+1, p.Title))
 		for _, e := range p.Evidence {
-			sb.WriteString(fmt.Sprintf("> %q  (lines %d-%d)\n\n", e.Quote, e.LineStart, e.LineEnd))
+			sb.WriteString(fmt.Sprintf("> %q  (%s)\n\n", e.Quote, evidenceAnnotation(e)))
 		}
 	}
 	return sb.String()
