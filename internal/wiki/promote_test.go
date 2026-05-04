@@ -13,6 +13,7 @@ import (
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 )
 
 // promoteTestFixture wires together a tempdir wiki + raw + db, ingests a
@@ -530,4 +531,60 @@ func TestPromoteAnswer_RetroLinksExistingPages(t *testing.T) {
 			t.Errorf("page %s body missing [[Validator Internals]] after retro-link:\n%s", want, body)
 		}
 	}
+}
+
+// TestRewritePromoteBody_AcceptsSchemaParam_StubLLM is the Phase B Task
+// 5 call-site shape test: assert sch flows into the rendered system
+// prompt for the optional rewrite path. Uses a recording LLM stub
+// directly against rewritePromoteBody (the in-package helper) so the
+// test stays independent of the full PromoteAnswer fixture.
+func TestRewritePromoteBody_AcceptsSchemaParam_StubLLM(t *testing.T) {
+	ev := []Evidence{
+		{Quote: "the validator drops unverified quotes", LineStart: 1, LineEnd: 1, SourceFilePath: "src.md"},
+	}
+	var capturedSystem, capturedUser string
+	stub := &stubLLMClient{
+		completeFn: func(ctx context.Context, system, user string) (string, error) {
+			capturedSystem = system
+			capturedUser = user
+			return "rewritten body", nil
+		},
+	}
+	got, err := rewritePromoteBody(context.Background(), stub,
+		"how does it work?",
+		"Original answer body.",
+		ev,
+		schema.Bundled())
+	if err != nil {
+		t.Fatalf("rewritePromoteBody: %v", err)
+	}
+	if got != "rewritten body" {
+		t.Errorf("got = %q, want canned response", got)
+	}
+	// The bundled rendered Prompts.PromoteRewrite is byte-equal to
+	// v0.6's promoteRewriteSystemPrompt (pinned by
+	// byte_equality_test.go).
+	if capturedSystem != PromoteRewriteSystemPromptForTests() {
+		t.Errorf("system prompt drifted from v0.6 promoteRewriteSystemPrompt; first 80 bytes: %q",
+			capturedSystem[:minRew(80, len(capturedSystem))])
+	}
+	// User prompt still carries the Question/Answer body/Verbatim
+	// quotes structure (kept in Go for v0.7; option (b) for these
+	// placeholders).
+	if !strings.Contains(capturedUser, "Question:") {
+		t.Errorf("user prompt missing 'Question:' header:\n%s", capturedUser)
+	}
+	if !strings.Contains(capturedUser, "Answer body:") {
+		t.Errorf("user prompt missing 'Answer body:' header:\n%s", capturedUser)
+	}
+	if !strings.Contains(capturedUser, "the validator drops unverified quotes") {
+		t.Errorf("user prompt missing the verbatim quote:\n%s", capturedUser)
+	}
+}
+
+func minRew(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

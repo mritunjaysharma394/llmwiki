@@ -12,6 +12,7 @@ import (
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 	"github.com/mritunjaysharma394/llmwiki/internal/wiki"
 )
 
@@ -44,7 +45,7 @@ func TestIngestSmall(t *testing.T) {
 	source := "Goroutines are lightweight threads of execution managed by the Go runtime.\nThe `go` keyword starts a goroutine.\nGoroutines communicate via channels.\n"
 	client := integrationClient(t, "ingest_small")
 
-	pages, err := wiki.IngestToPages(context.Background(), client, source, nil)
+	pages, err := wiki.IngestToPages(context.Background(), client, source, nil, schema.Bundled())
 	if err != nil {
 		t.Fatalf("IngestToPages: %v", err)
 	}
@@ -95,7 +96,7 @@ func TestIngestMultiChunk(t *testing.T) {
 	for i, c := range chunks {
 		// Use the legacy string-based wrapper so this test continues to replay
 		// against sub-project 1 cassettes recorded before the multi-file rewrite.
-		pages, err := wiki.IngestToPages(context.Background(), client, c.Text, nil)
+		pages, err := wiki.IngestToPages(context.Background(), client, c.Text, nil, schema.Bundled())
 		if err != nil {
 			t.Fatalf("chunk %d: %v", i, err)
 		}
@@ -120,7 +121,7 @@ func TestAskWithHits(t *testing.T) {
 		},
 	}}
 	client := integrationClient(t, "ask_with_hits")
-	answer, err := wiki.AnswerQuestion(context.Background(), client, "what are goroutines?", pages)
+	answer, err := wiki.AnswerQuestion(context.Background(), client, "what are goroutines?", pages, schema.Bundled())
 	if err != nil {
 		t.Fatalf("AnswerQuestion: %v", err)
 	}
@@ -131,7 +132,7 @@ func TestAskWithHits(t *testing.T) {
 
 func TestAskNoHits(t *testing.T) {
 	client := integrationClient(t, "ask_no_hits")
-	answer, err := wiki.AnswerQuestion(context.Background(), client, "what is etcd?", nil)
+	answer, err := wiki.AnswerQuestion(context.Background(), client, "what is etcd?", nil, schema.Bundled())
 	if err != nil {
 		t.Fatalf("AnswerQuestion: %v", err)
 	}
@@ -215,7 +216,7 @@ func TestIngestPDF(t *testing.T) {
 	// Cassette gate — skips cleanly when no fixture is present.
 	client := integrationClient(t, "ingest_pdf")
 
-	pages, err := wiki.IngestSourceFilesToPages(context.Background(), client, files, nil)
+	pages, err := wiki.IngestSourceFilesToPages(context.Background(), client, files, nil, schema.Bundled())
 	if err != nil {
 		t.Fatalf("IngestSourceFilesToPages: %v", err)
 	}
@@ -269,7 +270,7 @@ func TestIngestRepo(t *testing.T) {
 	// Cassette gate — skips cleanly when no fixture is present.
 	client := integrationClient(t, "ingest_repo")
 
-	pages, err := wiki.IngestSourceFilesToPages(context.Background(), client, files, nil)
+	pages, err := wiki.IngestSourceFilesToPages(context.Background(), client, files, nil, schema.Bundled())
 	if err != nil {
 		t.Fatalf("IngestSourceFilesToPages: %v", err)
 	}

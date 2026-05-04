@@ -28,6 +28,7 @@ import (
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 )
 
 // ErrEvidenceInvalid is returned when defensive re-validation of an
@@ -58,6 +59,12 @@ type PromoteOptions struct {
 	Title   string
 	Rewrite bool
 	NoSave  bool
+
+	// Schema is the active schema (Phase B Task 5). Only consulted on
+	// the optional rewrite path; the trust gate
+	// (ValidateAndAttachEvidence) and the post-rewrite verbatim-quote
+	// re-check run regardless of schema content.
+	Schema schema.Schema
 }
 
 // PromoteResult is the structured success / failure shape PromoteAnswer
@@ -253,7 +260,7 @@ func PromoteAnswer(ctx context.Context, cfg IngestSourceConfig, database *db.DB,
 	//    quotes can't all be substring-validated against the same file
 	//    set, fall back to the verbatim body and warn (never fails).
 	if opts.Rewrite && client != nil {
-		rewritten, rerr := rewritePromoteBody(ctx, client, parsed.Question, body, page.Evidence)
+		rewritten, rerr := rewritePromoteBody(ctx, client, parsed.Question, body, page.Evidence, opts.Schema)
 		switch {
 		case rerr != nil:
 			fmt.Fprintf(os.Stderr, "  WARN rewrite call failed (%v); falling back to verbatim body\n", rerr)
@@ -485,7 +492,20 @@ func PromoteRewriteSystemPromptForTests() string { return promoteRewriteSystemPr
 // rewritePromoteBody asks the LLM for a wiki-prose rewrite of the answer
 // body, gently nudged to keep every evidence quote intact. Returns the
 // raw rewritten string; the caller validates and falls back on failure.
-func rewritePromoteBody(ctx context.Context, client llm.Client, question, body string, ev []Evidence) (string, error) {
+//
+// sch (Phase B Task 5) supplies the schema-driven system prompt via
+// sch.Prompts.PromoteRewrite. Bundled placeholders ({{question}},
+// {{answer_body}}, {{evidence_quotes}}) render to empty so the
+// bundled-default system prompt is byte-equal to v0.6's; the actual
+// question / body / quotes payload is built into the user prompt below.
+// A user editing AGENTS.md can move the placeholders into a different
+// position in the system prompt for custom layouts.
+func rewritePromoteBody(ctx context.Context, client llm.Client, question, body string, ev []Evidence, sch schema.Schema) (string, error) {
+	sysPrompt := sch.Render(sch.Prompts.PromoteRewrite, map[string]string{
+		"question":        "",
+		"answer_body":     "",
+		"evidence_quotes": "",
+	})
 	var sb strings.Builder
 	sb.WriteString("Question:\n")
 	sb.WriteString(question)
@@ -495,7 +515,7 @@ func rewritePromoteBody(ctx context.Context, client llm.Client, question, body s
 	for _, e := range ev {
 		sb.WriteString(fmt.Sprintf("- %q\n", e.Quote))
 	}
-	return client.Complete(ctx, promoteRewriteSystemPrompt, sb.String())
+	return client.Complete(ctx, sysPrompt, sb.String())
 }
 
 // rewriteEvidencesValid checks that every parsed quote still appears

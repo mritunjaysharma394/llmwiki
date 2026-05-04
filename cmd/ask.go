@@ -12,6 +12,7 @@ import (
 	"github.com/mattn/go-isatty"
 	"github.com/mritunjaysharma394/llmwiki/internal/cliutil"
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 	"github.com/mritunjaysharma394/llmwiki/internal/wiki"
 	"github.com/spf13/cobra"
 )
@@ -136,7 +137,9 @@ func runAsk(cmd *cobra.Command, args []string) error {
 		var buf strings.Builder
 		mw := io.MultiWriter(os.Stdout, &buf)
 		fmt.Println()
-		ans, err := wiki.StreamAnswer(ctx, llmClient, question, pages, mw)
+		// Phase B Task 5: schema.Bundled() temporary; Phase C wires
+		// the activeSchema global through cmd/root.go's loadConfig.
+		ans, err := wiki.StreamAnswer(ctx, llmClient, question, pages, mw, schema.Bundled())
 		fmt.Println()
 		if err != nil {
 			return fmt.Errorf("streaming answer: %w", err)
@@ -149,7 +152,9 @@ func runAsk(cmd *cobra.Command, args []string) error {
 		}
 	} else {
 		spin := startSpinner("Thinking...")
-		ans, err := wiki.AnswerQuestion(ctx, llmClient, question, pages)
+		// Phase B Task 5: schema.Bundled() temporary; Phase C wires
+		// the activeSchema global through cmd/root.go's loadConfig.
+		ans, err := wiki.AnswerQuestion(ctx, llmClient, question, pages, schema.Bundled())
 		spin.Stop()
 		if err != nil {
 			return fmt.Errorf("llm answer: %w", err)

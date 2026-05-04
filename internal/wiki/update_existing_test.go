@@ -15,6 +15,7 @@ import (
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 )
 
 // stubUpdateClient is a minimal llm.Client whose CompleteStructured calls
@@ -1237,4 +1238,61 @@ func (b *bytesBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return string(b.b)
+}
+
+// TestUpdateExistingPagesFromSource_AcceptsSchemaParam_StubLLM is the
+// Phase B Task 5 call-site shape test: assert UpdateExistingOptions
+// .Schema flows into the rendered system prompt that hits the LLM.
+// Mirrors the v0.6 happy path but pins the system prompt to v0.6's
+// updateExistingSystemPrompt const (byte-equality contract).
+func TestUpdateExistingPagesFromSource_AcceptsSchemaParam_StubLLM(t *testing.T) {
+	existingSrc := "first existing quote here.\nsecond existing quote here.\n"
+	fx := setupUpdateB2Fixture(t, existingSrc)
+
+	priorBody := "Old body about widgets.\n"
+	fx.seedPageB2(t, "Widget Internals", priorBody, []string{
+		"first existing quote here.",
+		"second existing quote here.",
+	})
+
+	newSrcContent := []byte("new fact widgets and existing.\nanother fact widgets.\n")
+	newSrc := ingest.NewSourceFile("widgets-new.md", newSrcContent)
+
+	newBody := "New body covering widgets, with refinements.\n"
+	resp := llmPagesResponse("Widget Internals", newBody, []struct{ Quote, SourceFile string }{
+		{Quote: "new fact widgets and existing.", SourceFile: "widgets-new.md"},
+		{Quote: "another fact widgets.", SourceFile: "widgets-new.md"},
+	})
+
+	var capturedSystem string
+	client := &stubUpdateClient{
+		completeStructuredFn: func(ctx context.Context, system, user string, ts llm.ToolSchema) (map[string]any, error) {
+			capturedSystem = system
+			return resp, nil
+		},
+	}
+
+	res, err := UpdateExistingPagesFromSource(context.Background(), fx.Cfg, fx.DB, client, fx.SourceID,
+		[]ingest.SourceFile{newSrc}, nil, UpdateExistingOptions{
+			Schema: schema.Bundled(),
+		})
+	if err != nil {
+		t.Fatalf("UpdateExistingPagesFromSource: %v", err)
+	}
+	if res.PagesUpdated != 1 {
+		t.Errorf("PagesUpdated = %d, want 1", res.PagesUpdated)
+	}
+	// The bundled rendered Prompts.UpdateExisting is byte-equal to v0.6's
+	// updateExistingSystemPrompt (pinned by byte_equality_test.go).
+	if capturedSystem != UpdateExistingSystemPromptForTests() {
+		t.Errorf("system prompt drifted from v0.6 updateExistingSystemPrompt; first 80 bytes: %q",
+			capturedSystem[:minInt(80, len(capturedSystem))])
+	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

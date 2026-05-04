@@ -28,6 +28,7 @@ import (
 	"strings"
 
 	"github.com/mritunjaysharma394/llmwiki/internal/cliutil"
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 	"github.com/mritunjaysharma394/llmwiki/internal/wiki"
 	"github.com/spf13/cobra"
 )
@@ -73,6 +74,9 @@ func runPromote(cmd *cobra.Command, args []string) error {
 		Title:   title,
 		Rewrite: rewrite,
 		NoSave:  noSave,
+		// Phase B Task 5: schema.Bundled() temporary; Phase C wires
+		// the activeSchema global through cmd/root.go's loadConfig.
+		Schema: schema.Bundled(),
 	})
 	if err != nil {
 		switch {

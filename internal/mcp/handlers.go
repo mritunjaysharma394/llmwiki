@@ -18,6 +18,7 @@ import (
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 	"github.com/mritunjaysharma394/llmwiki/internal/wiki"
 )
 
@@ -243,7 +244,9 @@ func runLintInternal(ctx context.Context, d Deps) (LintResult, error) {
 			end = len(pages)
 		}
 		batch := pages[i:end]
-		result, err := wiki.DetectContradictions(ctx, d.Client, batch)
+		// Phase B Task 5: pass schema.Bundled() temporarily; Phase I
+		// (Task 14) wires the active schema in via Deps.Schema.
+		result, err := wiki.DetectContradictions(ctx, d.Client, batch, schema.Bundled())
 		if err != nil {
 			out.Contradictions = append(out.Contradictions, fmt.Sprintf("  WARN: contradiction check failed: %v", err))
 			continue
@@ -402,7 +405,9 @@ func askHandler(d Deps) mcpsrv.ToolHandlerFunc {
 			})
 		}
 
-		answer, err := wiki.AnswerQuestion(ctx, d.Client, question, pages)
+		// Phase B Task 5: pass schema.Bundled() temporarily; Phase I
+		// (Task 14) wires the active schema in via Deps.Schema.
+		answer, err := wiki.AnswerQuestion(ctx, d.Client, question, pages, schema.Bundled())
 		if err != nil {
 			return errorResult("llm_error", "answering question: "+err.Error(), nil), nil
 		}

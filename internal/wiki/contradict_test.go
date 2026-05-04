@@ -19,6 +19,7 @@ import (
 
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 )
 
 // stubContradictClient is a minimal llm.Client whose Complete returns a
@@ -214,7 +215,7 @@ func TestDetectIngestContradictions_FiltersHallucinatedQuotes(t *testing.T) {
 	}
 
 	allRecs, _ := fx.DB.AllPages()
-	got, err := DetectIngestContradictions(context.Background(), client, []Page{newPage}, allRecs, 5, fx.DB)
+	got, err := DetectIngestContradictions(context.Background(), client, []Page{newPage}, allRecs, 5, fx.DB, schema.Bundled())
 	if err != nil {
 		t.Fatalf("DetectIngestContradictions: %v", err)
 	}
@@ -251,7 +252,7 @@ func TestDetectIngestContradictions_HappyPath(t *testing.T) {
 	}
 
 	allRecs, _ := fx.DB.AllPages()
-	got, err := DetectIngestContradictions(context.Background(), client, []Page{newPage}, allRecs, 5, fx.DB)
+	got, err := DetectIngestContradictions(context.Background(), client, []Page{newPage}, allRecs, 5, fx.DB, schema.Bundled())
 	if err != nil {
 		t.Fatalf("DetectIngestContradictions: %v", err)
 	}
@@ -317,7 +318,7 @@ func TestDetectIngestContradictions_LLMErrorReturnsEmptyAndLogs(t *testing.T) {
 	os.Stderr = w
 
 	allRecs, _ := fx.DB.AllPages()
-	got, err := DetectIngestContradictions(context.Background(), client, []Page{newPage}, allRecs, 5, fx.DB)
+	got, err := DetectIngestContradictions(context.Background(), client, []Page{newPage}, allRecs, 5, fx.DB, schema.Bundled())
 
 	w.Close()
 	os.Stderr = origStderr
@@ -368,7 +369,7 @@ func TestDetectIngestContradictions_DedupsBidirectionalPairs(t *testing.T) {
 	// Pass the same page twice in newPages to force dup attempts. The
 	// dedup key is (newPageTitle, existingTitle), so identical new
 	// entries collapse to one Contradiction.
-	got, err := DetectIngestContradictions(context.Background(), client, []Page{newPage, newPage}, allRecs, 5, fx.DB)
+	got, err := DetectIngestContradictions(context.Background(), client, []Page{newPage, newPage}, allRecs, 5, fx.DB, schema.Bundled())
 	if err != nil {
 		t.Fatalf("DetectIngestContradictions: %v", err)
 	}
@@ -397,7 +398,7 @@ func TestDetectIngestContradictions_EmptyNewPages(t *testing.T) {
 	}
 
 	allRecs, _ := fx.DB.AllPages()
-	got, err := DetectIngestContradictions(context.Background(), client, nil, allRecs, 5, fx.DB)
+	got, err := DetectIngestContradictions(context.Background(), client, nil, allRecs, 5, fx.DB, schema.Bundled())
 	if err != nil {
 		t.Fatalf("DetectIngestContradictions: %v", err)
 	}
@@ -483,4 +484,56 @@ func TestAppendContradictions(t *testing.T) {
 	if strings.Index(out, "src1") > strings.Index(out, "src2") {
 		t.Errorf("append order violated:\n%s", out)
 	}
+}
+
+// TestDetectIngestContradictions_AcceptsSchemaParam_StubLLM is the
+// Phase B Task 5 call-site shape test: assert the new sch parameter
+// integrates without breaking detection. The stub returns one
+// well-formed contradiction tuple referencing both pages' validated
+// quotes; the matcher returns one Contradiction.
+func TestDetectIngestContradictions_AcceptsSchemaParam_StubLLM(t *testing.T) {
+	fx := setupContradictFixture(t)
+	existingQuote := "Mutex always blocks until acquired."
+	fx.seedExistingPage(t, "Mutex Behavior",
+		"Mutex behaves one way.\nMutex always blocks until acquired.\n",
+		existingQuote)
+
+	newQuote := "Mutex never blocks acquisition path."
+	newPage := Page{
+		Title: "Lock-free Mutex",
+		Body:  "Lock-free Mutex never blocks acquisition path.\n",
+		Evidence: []Evidence{
+			{Quote: newQuote, LineStart: 5, LineEnd: 5, SourceFilePath: "new.md"},
+		},
+	}
+
+	var capturedSystem string
+	client := &stubContradictClient{
+		completeFn: func(ctx context.Context, system, user string) (string, error) {
+			capturedSystem = system
+			return `[{"a_quote":"` + newQuote + `","b_quote":"` + existingQuote + `","description":"disagreement"}]`, nil
+		},
+	}
+
+	allRecs, _ := fx.DB.AllPages()
+	got, err := DetectIngestContradictions(context.Background(), client, []Page{newPage}, allRecs, 5, fx.DB, schema.Bundled())
+	if err != nil {
+		t.Fatalf("DetectIngestContradictions: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d contradictions, want 1", len(got))
+	}
+	// The bundled rendered Prompts.Contradiction is byte-equal to v0.6's
+	// contradictionSystemPrompt (pinned by byte_equality_test.go).
+	if capturedSystem != ContradictionSystemPromptForTests() {
+		t.Errorf("system prompt drifted from v0.6 contradictionSystemPrompt; first 80 bytes: %q",
+			capturedSystem[:min(80, len(capturedSystem))])
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

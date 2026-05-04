@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 	"github.com/mritunjaysharma394/llmwiki/internal/wiki"
 )
 
@@ -32,14 +33,14 @@ func TestSmokeIngestThenAsk(t *testing.T) {
 		t.Fatal("ChunkSourceFiles returned no chunks")
 	}
 	client := integrationClient(t, "smoke")
-	pages, err := wiki.IngestSourceFilesToPages(context.Background(), client, chunks[0].Files, nil)
+	pages, err := wiki.IngestSourceFilesToPages(context.Background(), client, chunks[0].Files, nil, schema.Bundled())
 	if err != nil {
 		t.Fatalf("IngestSourceFilesToPages: %v", err)
 	}
 	if len(pages) == 0 {
 		t.Fatal("smoke ingest produced no pages")
 	}
-	answer, err := wiki.AnswerQuestion(context.Background(), client, "what is the smoke source about?", pages)
+	answer, err := wiki.AnswerQuestion(context.Background(), client, "what is the smoke source about?", pages, schema.Bundled())
 	if err != nil {
 		t.Fatalf("AnswerQuestion: %v", err)
 	}

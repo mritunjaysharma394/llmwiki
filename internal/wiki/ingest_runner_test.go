@@ -15,6 +15,7 @@ import (
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 )
 
 // fakeIngestPagesClient stubs CompleteStructured with a single page whose
@@ -497,10 +498,11 @@ func installIngestSeams(t *testing.T, upRes UpdateResult, upErr error) *ingestSe
 		existingPages []db.PageRecord,
 		candidateLimit int,
 		database *db.DB,
+		sch schema.Schema,
 	) ([]Contradiction, error) {
 		h.counter++
 		h.contraOrder = h.counter
-		return origContra(ctx, client, newPages, existingPages, candidateLimit, database)
+		return origContra(ctx, client, newPages, existingPages, candidateLimit, database, sch)
 	}
 	regenerateIndexFn = func(wikiDir string, recs []db.PageRecord, srcs []db.Source, ts time.Time) error {
 		h.counter++
@@ -852,6 +854,7 @@ func installContradictionForcedCandidatesSeams(t *testing.T, contras []Contradic
 		existingPages []db.PageRecord,
 		candidateLimit int,
 		database *db.DB,
+		sch schema.Schema,
 	) ([]Contradiction, error) {
 		return h.contras, nil
 	}

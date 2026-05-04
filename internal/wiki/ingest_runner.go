@@ -30,6 +30,7 @@ import (
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 )
 
 const ingestMaxInflight = 5
@@ -86,6 +87,13 @@ type IngestOptions struct {
 	// Logger receives the human-readable progress lines runIngest used to
 	// print to stdout. nil → io.Discard (the MCP handler passes nil).
 	Logger io.Writer
+
+	// Schema is the active schema (Phase B Task 5). Threaded into every
+	// downstream prompt-using call (IngestSourceFilesToPages,
+	// DetectIngestContradictions, UpdateExistingPagesFromSource).
+	// cmd/ callers set this from cmd/root.go's loadConfig in Phase C;
+	// Phase B leaves Bundled() as a temporary placeholder.
+	Schema schema.Schema
 }
 
 // IngestRunResult is what cmd and MCP both surface to their callers.
@@ -313,7 +321,7 @@ func IngestSource(ctx context.Context, cfg IngestSourceConfig, database *db.DB, 
 		go func(i int, ch ingest.Chunk) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			got, err := IngestSourceFilesToPages(ctx, client, ch.Files, titles)
+			got, err := IngestSourceFilesToPages(ctx, client, ch.Files, titles, opts.Schema)
 			results[i] = chunkResult{pages: got, err: err, idx: i}
 			n := atomic.AddInt64(&done, 1)
 			fmt.Fprintf(logger, "\r  [%d/%d] processed", n, len(chunks))
@@ -502,7 +510,7 @@ func IngestSource(ctx context.Context, cfg IngestSourceConfig, database *db.DB, 
 			existingNonNew = append(existingNonNew, p)
 		}
 	}
-	contras, _ := detectIngestContradictionsFn(ctx, client, allPages, existingNonNew, DefaultContradictionCandidateLimit, database)
+	contras, _ := detectIngestContradictionsFn(ctx, client, allPages, existingNonNew, DefaultContradictionCandidateLimit, database, opts.Schema)
 	if len(contras) > 0 {
 		out.ContradictionsFlagged = len(contras)
 		logf("\n!! %d contradiction(s) flagged against the new pages:\n", len(contras))
@@ -544,6 +552,7 @@ func IngestSource(ctx context.Context, cfg IngestSourceConfig, database *db.DB, 
 				DebugUpdates:           opts.DebugUpdates,
 				Logger:                 opts.Logger,
 				ForcedCandidateIDs:     forcedIDs,
+				Schema:                 opts.Schema,
 			})
 		if upErr != nil {
 			fmt.Fprintf(os.Stderr, "  WARN cross-page update pass: %v\n", upErr)

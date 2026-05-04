@@ -10,6 +10,7 @@ import (
 
 	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 )
 
 type IngestResult struct {
@@ -81,17 +82,21 @@ RULES:
 // content is presented to the LLM under a "=== path ===" marker, and the
 // validator anchors each evidence quote to the file the LLM named in
 // source_file (with a content-search fallback when source_file is empty).
-func IngestSourceFilesToPages(ctx context.Context, client llm.Client, files []ingest.SourceFile, existingTitles []string) ([]Page, error) {
+//
+// sch is the active schema (Phase B Task 5): the system prompt is rendered
+// from sch.Prompts.Ingest with vars {domain, existing_titles, glossary}.
+// The TRUST PROPERTY is unchanged: ValidateAndAttachEvidence runs after
+// the LLM call regardless of schema content (it is bundled and unreachable
+// from the schema).
+func IngestSourceFilesToPages(ctx context.Context, client llm.Client, files []ingest.SourceFile, existingTitles []string, sch schema.Schema) ([]Page, error) {
+	sysPrompt := sch.Render(sch.Prompts.Ingest, map[string]string{
+		"domain":          sch.Domain,
+		"existing_titles": formatExistingTitlesForPrompt(existingTitles),
+		"glossary":        formatGlossaryForPrompt(sch.Glossary),
+	})
+
 	var sb strings.Builder
-	sb.WriteString("Existing wiki pages (titles only):\n")
-	if len(existingTitles) == 0 {
-		sb.WriteString("(none yet)\n")
-	} else {
-		for _, t := range existingTitles {
-			sb.WriteString("- " + t + "\n")
-		}
-	}
-	sb.WriteString("\n---\nSOURCE to ingest:\n\n")
+	sb.WriteString("SOURCE to ingest:\n\n")
 	for i, f := range files {
 		if i > 0 {
 			sb.WriteString("\n")
@@ -103,7 +108,7 @@ func IngestSourceFilesToPages(ctx context.Context, client llm.Client, files []in
 		}
 	}
 
-	result, err := client.CompleteStructured(ctx, ingestSystemPrompt, sb.String(), writePagesTool)
+	result, err := client.CompleteStructured(ctx, sysPrompt, sb.String(), writePagesTool)
 	if err != nil {
 		return nil, fmt.Errorf("llm structured call: %w", err)
 	}
@@ -125,9 +130,44 @@ func IngestSourceFilesToPages(ctx context.Context, client llm.Client, files []in
 // in a single synthetic SourceFile and delegates to IngestSourceFilesToPages.
 // New callers should use IngestSourceFilesToPages directly so they can pass
 // per-file paths that the validator can attribute quotes to.
-func IngestToPages(ctx context.Context, client llm.Client, sourceContent string, existingTitles []string) ([]Page, error) {
+func IngestToPages(ctx context.Context, client llm.Client, sourceContent string, existingTitles []string, sch schema.Schema) ([]Page, error) {
 	files := []ingest.SourceFile{ingest.NewSourceFile("source", []byte(sourceContent))}
-	return IngestSourceFilesToPages(ctx, client, files, existingTitles)
+	return IngestSourceFilesToPages(ctx, client, files, existingTitles, sch)
+}
+
+// formatExistingTitlesForPrompt renders existingTitles as the bullet
+// list the schema's {{existing_titles}} placeholder expects. Empty list
+// returns the v0.6 sentinel "(none yet)" so the bundled-default render
+// matches v0.6 byte-for-byte (see internal/schema/byte_equality_test.go).
+func formatExistingTitlesForPrompt(titles []string) string {
+	if len(titles) == 0 {
+		return "(none yet)"
+	}
+	var sb strings.Builder
+	for i, t := range titles {
+		if i > 0 {
+			sb.WriteByte('\n')
+		}
+		sb.WriteString("- " + t)
+	}
+	return sb.String()
+}
+
+// formatGlossaryForPrompt renders a glossary slice as `- term: definition`
+// bullet rows. Empty glossary produces zero bytes so the bundled-default
+// render matches v0.6 byte-for-byte.
+func formatGlossaryForPrompt(terms []schema.GlossaryTerm) string {
+	if len(terms) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for i, g := range terms {
+		if i > 0 {
+			sb.WriteByte('\n')
+		}
+		sb.WriteString("- " + g.Term + ": " + g.Definition)
+	}
+	return sb.String()
 }
 
 // ExtractPagesFromToolResult parses the LLM tool-call result into Page structs.
@@ -274,12 +314,27 @@ For PDF pages the file becomes "page-N":
 
 If pages and quotes are insufficient, say so plainly. Do not fabricate.`
 
-func AnswerQuestion(ctx context.Context, client llm.Client, question string, contextPages []Page) (string, error) {
-	return client.Complete(ctx, answerSystemPrompt, buildAnswerUserPrompt(question, contextPages))
+// AnswerQuestion renders sch.Prompts.Ask and asks the LLM to compose a
+// natural-language answer over the provided wiki pages. sch (Phase B
+// Task 5) supplies the schema-driven system prompt; bundled defaults
+// produce the v0.6 system prompt byte-for-byte.
+func AnswerQuestion(ctx context.Context, client llm.Client, question string, contextPages []Page, sch schema.Schema) (string, error) {
+	sysPrompt := sch.Render(sch.Prompts.Ask, map[string]string{
+		"domain":   sch.Domain,
+		"glossary": formatGlossaryForPrompt(sch.Glossary),
+	})
+	return client.Complete(ctx, sysPrompt, buildAnswerUserPrompt(question, contextPages))
 }
 
-func StreamAnswer(ctx context.Context, client llm.Client, question string, contextPages []Page, w io.Writer) (string, error) {
-	return client.CompleteStream(ctx, answerSystemPrompt, buildAnswerUserPrompt(question, contextPages), w)
+// StreamAnswer is the streaming sibling of AnswerQuestion. Identical
+// system-prompt rendering + user-prompt construction; emits chunks to w
+// as the model writes.
+func StreamAnswer(ctx context.Context, client llm.Client, question string, contextPages []Page, w io.Writer, sch schema.Schema) (string, error) {
+	sysPrompt := sch.Render(sch.Prompts.Ask, map[string]string{
+		"domain":   sch.Domain,
+		"glossary": formatGlossaryForPrompt(sch.Glossary),
+	})
+	return client.CompleteStream(ctx, sysPrompt, buildAnswerUserPrompt(question, contextPages), w)
 }
 
 func buildAnswerUserPrompt(question string, pages []Page) string {
@@ -344,16 +399,21 @@ func toSlice(v any) ([]any, bool) {
 const lintContradictionsSystemPrompt = `You are a wiki consistency checker. Identify factual contradictions between wiki pages.
 List each contradiction as: "Page A vs Page B: <description>". If no contradictions, say "No contradictions found."`
 
-func DetectContradictions(ctx context.Context, client llm.Client, pages []Page) (string, error) {
+// DetectContradictions is the whole-wiki batched lint scan run by
+// `llmwiki lint`. sch (Phase B Task 5) supplies the system prompt via
+// sch.Prompts.LintContradictions; bundled defaults produce the v0.6
+// lint prompt byte-for-byte.
+func DetectContradictions(ctx context.Context, client llm.Client, pages []Page, sch schema.Schema) (string, error) {
 	if len(pages) < 2 {
 		return "", nil
 	}
+	sysPrompt := sch.Render(sch.Prompts.LintContradictions, nil)
 	var sb strings.Builder
 	for _, p := range pages {
 		sb.WriteString(fmt.Sprintf("## %s\n\n%s\n\n---\n\n", p.Title, p.Body))
 	}
 
-	return client.Complete(ctx, lintContradictionsSystemPrompt, sb.String())
+	return client.Complete(ctx, sysPrompt, sb.String())
 }
 
 // IngestSystemPromptForTests exposes the v0.6 hard-coded ingest system

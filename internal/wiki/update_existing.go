@@ -24,6 +24,7 @@ import (
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 )
 
 const (
@@ -79,6 +80,14 @@ type UpdateExistingOptions struct {
 	Logger                 io.Writer
 
 	ForcedCandidateIDs []int64
+
+	// Schema is the active schema (Phase B Task 5): the per-candidate
+	// system prompt is rendered from Schema.Prompts.UpdateExisting with
+	// {domain, existing_page_body, existing_evidence, glossary}. The
+	// trust gate (ValidateAndAttachEvidence) runs over the LLM output
+	// regardless of schema content; the schema cannot ground a false
+	// claim.
+	Schema schema.Schema
 }
 
 // UpdateResult is the structured success / failure shape
@@ -196,6 +205,18 @@ func UpdateExistingPagesFromSource(
 
 	llmOutcomes := make([]llmOutcome, len(bundles))
 
+	// Render the per-call system prompt once (the per-candidate
+	// existing_page_body / existing_evidence stay in the user prompt
+	// for v0.7 — bundled placeholders render to empty so byte-equality
+	// with v0.6 holds; users editing AGENTS.md can rearrange the
+	// surrounding structure into the schema if they want).
+	sysPrompt := opts.Schema.Render(opts.Schema.Prompts.UpdateExisting, map[string]string{
+		"domain":             opts.Schema.Domain,
+		"existing_page_body": "",
+		"existing_evidence":  "",
+		"glossary":           formatGlossaryForPrompt(opts.Schema.Glossary),
+	})
+
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, ingestMaxInflight)
 	for i, b := range bundles {
@@ -204,7 +225,7 @@ func UpdateExistingPagesFromSource(
 		go func(i int, b candidateBundle) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			result, err := client.CompleteStructured(ctx, updateExistingSystemPrompt, b.user, writePagesTool)
+			result, err := client.CompleteStructured(ctx, sysPrompt, b.user, writePagesTool)
 			llmOutcomes[i] = llmOutcome{idx: i, result: result, err: err}
 		}(i, b)
 	}

@@ -34,6 +34,7 @@ import (
 
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 )
 
 // Contradiction is one detected disagreement between a just-written page
@@ -113,7 +114,9 @@ func DetectIngestContradictions(
 	existingPages []db.PageRecord,
 	candidateLimit int,
 	database *db.DB,
+	sch schema.Schema,
 ) ([]Contradiction, error) {
+	sysPrompt := sch.Render(sch.Prompts.Contradiction, nil)
 	if len(newPages) == 0 {
 		return nil, nil
 	}
@@ -151,7 +154,7 @@ func DetectIngestContradictions(
 			existingPaths := evidenceSourceFilePaths(database, ep, existingEv)
 
 			user := buildContradictionPrompt(np, ep, existingEv)
-			raw, err := client.Complete(ctx, contradictionSystemPrompt, user)
+			raw, err := client.Complete(ctx, sysPrompt, user)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "  WARN contradiction check failed for %q vs %q: %v\n", np.Title, ep.Title, err)
 				continue
