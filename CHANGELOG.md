@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0-rc.1] — 2026-05-04
+
+### Added
+- `AGENTS.md` (or `CLAUDE.md`) at the wiki root — the user-editable
+  schema doc. Defines the page ontology and the six prompts driving
+  ingest / ask / update-existing / contradiction / promote-rewrite /
+  lint. llmwiki looks for `AGENTS.md` first (multi-vendor convention;
+  Cursor, OpenAI Codex, and Claude Code all read it), then falls
+  back to `CLAUDE.md`. If both exist with identical bytes,
+  AGENTS.md wins; if both exist and differ, llmwiki refuses to
+  guess. Bundled defaults are byte-identical to v0.6 behaviour;
+  user edits override per section. Karpathy's third layer.
+- `llmwiki schema show [--bundled|--doc|--hash]` — inspect the
+  effective schema (merged), the bundled default, the user doc
+  verbatim, or just the active hash for scripting.
+- `llmwiki schema validate` — structural validation with
+  file:line errors; surfaces every problem at once via
+  MultiError.
+- `llmwiki schema migrate [--yes] [--dry-run]` — eager re-ingest
+  of every page on a prior schema hash under the active schema.
+  Resumable for free via per-page hash check.
+- `llmwiki init` writes the schema doc alongside `.llmwiki/config.toml`.
+  New `--rewrite-schema` flag overwrites an existing schema file
+  (idempotent: by default `init` leaves an existing schema alone).
+  New `--schema-file=CLAUDE.md` flag selects the dual-vendor filename.
+- `mcp.get_schema` — new read-only MCP tool returning the active
+  schema as a structured payload (schema_version, domain,
+  ontology_fields, prompts.{...}, glossary, hash, doc_path). No
+  `mcp.set_schema` — agents introspect, they do not edit.
+- `pages.schema_hash TEXT NOT NULL DEFAULT ''` column at
+  `user_version = 5`. Stamped on every WritePage write site
+  (ingest, promote, cross-page update, mcp.write_page). Pre-v0.7
+  rows get '', treated as "prior schema" by lint and status.
+- `cmd/lint` surfaces `schema_drift: <n> pages on prior schema`
+  warning.
+- `cmd/status` surfaces a `schema:` line:
+  `schema: AGENTS.md (hash 91e..., N pages on prior hash)` or
+  `schema: bundled (no AGENTS.md), N pages on active hash`.
+- Page ontology rename + reorder: a user can rename `evidence` to
+  `citations`, `body` to `summary`, etc., and reorder fields in
+  frontmatter emission. The canonical struct field carrying
+  evidence quotes stays fixed; the rename is a naming convenience
+  over disk emission only. The validator pins the *check* to the
+  canonical struct field regardless of declared name.
+- Extra-frontmatter pass-through: schemas can declare fields
+  beyond the canonical set (e.g. `priority`); `Page.ExtraFrontmatter`
+  round-trips them on Read/Write. The bundled validator does not
+  check these values; truly new structured fields with their own
+  validation are a v0.8+ question.
+
+### Changed
+- `internal/mcp` `serverVersion` bumped to `0.7.0-rc.1`.
+- Six prompt sites in `internal/wiki/` (ingest, ask, lint
+  contradictions, per-pair contradiction, cross-page update,
+  promote rewrite) now render their system prompts via
+  `schema.Schema.Render(...)`. The hard-coded `const` strings
+  remain in place as test-only `*PromptForTests` exports for the
+  byte-equality regression guard; they come out in v0.8.
+- `WritePage` and `ParsePage` keep their legacy signatures and
+  delegate to `*WithSchema` variants using `schema.Bundled()` —
+  pre-v0.7 callers see no behaviour change.
+
 ### Fixed
 - Default Gemini model bumped from `gemini-2.0-flash` (deprecated by
   Google for new users; HTTP 404 on first ingest) to
@@ -16,6 +78,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pinned in their `config.toml` should update the line by hand.
   Cassette tests are unaffected — replay reads the recorded model
   name from the JSON payloads, not the live default.
+
+### Notes
+- **Schema migration v4 → v5 is additive only.** New
+  `schema_hash` column on `pages`; no `ALTER TABLE` on other
+  tables; `evidence`, `sources`, `source_files`, `chunks`,
+  `page_update_log` are byte-identical pre/post v5. Roll-forward
+  only — no down-migration script.
+- **Q1 — schema doc filename: `AGENTS.md` (or `CLAUDE.md`) at
+  wiki root**, not `.llmwiki/schema.md`. Karpathy alignment +
+  multi-vendor convention. The original first cut was
+  `.llmwiki/schema.md`; the user's directive prioritised Karpathy
+  alignment + user-friendliness. AGENTS.md is the primary;
+  `CLAUDE.md` is the native-filename fallback for Claude Code
+  users who already have one.
+- **Trust property reaffirmed.** The schema controls what the
+  LLM is asked, not what counts as valid evidence. Substring-match
+  validator is bundled and unreachable from the schema. Worst
+  case from a malicious schema: degraded quality. Best case:
+  better-shaped pages because the prompt fits the user's
+  domain. README has the full reaffirmation.
+- **Domain schema library** (`--schema=research-papers` etc.) is
+  out of scope for v0.7 (Q10). Default ships "general-purpose
+  wiki matching v0.6"; users hand-edit. v0.8+ question whether
+  to ship bundled domain schemas.
+- **Schema versioning** is `schema_version: 1` in frontmatter
+  (Q11). v0.7 only knows version 1; future format changes bump
+  the integer with a "this schema declares version 2; upgrade
+  llmwiki" error.
+- **`llmwiki schema diff`** is deferred to v0.8 (Q12). `git diff`
+  over the schema doc does the same job for any user with
+  `.llmwiki/` + `AGENTS.md` (or `CLAUDE.md`) under source control
+  (recommended).
+- **No per-call schema overrides over MCP** (Q15). Per-call
+  overrides re-introduce the agent-edits-the-system-prompts
+  confused-deputy surface. The schema is loaded once at server
+  start.
 
 ## [0.6.0-rc.1] — 2026-05-04
 
@@ -235,7 +333,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   database.
 - Cassette-based LLM client for record/replay testing.
 
-[Unreleased]: https://github.com/mritunjaysharma394/llmwiki/compare/v0.6.0-rc.1...HEAD
+[Unreleased]: https://github.com/mritunjaysharma394/llmwiki/compare/v0.7.0-rc.1...HEAD
+[0.7.0-rc.1]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v0.7.0-rc.1
 [0.6.0-rc.1]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v0.6.0-rc.1
 [0.5.0-rc.1]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v0.5.0-rc.1
 [0.4.0]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v0.4.0
