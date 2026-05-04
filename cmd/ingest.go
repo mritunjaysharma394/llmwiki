@@ -11,7 +11,6 @@ import (
 	"github.com/mritunjaysharma394/llmwiki/internal/cliutil"
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
-	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 	"github.com/mritunjaysharma394/llmwiki/internal/wiki"
 	"github.com/spf13/cobra"
 )
@@ -287,10 +286,10 @@ func buildWikiIngestOptions(cmd *cobra.Command, c *Config) wiki.IngestOptions {
 		opts.UpdateExistingMaxCandidatesTotal = c.Ingest.UpdateExistingMaxCandidatesTotal
 		opts.UpdateExistingQuoteFloor = c.Ingest.UpdateExistingQuoteFloor
 	}
-	// Phase B Task 5: pass schema.Bundled() temporarily; Phase C
-	// (Task 6) replaces this with the activeSchema global threaded
-	// through cmd/root.go's loadConfig.
-	opts.Schema = schema.Bundled()
+	// Phase C Task 6: activeSchema is loaded by cmd/root.go's
+	// loadConfig from AGENTS.md / CLAUDE.md at the wiki root, falling
+	// back to schema.Bundled() when neither file exists.
+	opts.Schema = activeSchema
 	return opts
 }
 

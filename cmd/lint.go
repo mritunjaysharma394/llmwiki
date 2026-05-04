@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/mritunjaysharma394/llmwiki/internal/cliutil"
-	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 	"github.com/mritunjaysharma394/llmwiki/internal/wiki"
 	"github.com/spf13/cobra"
 )
@@ -71,9 +70,10 @@ func runLint(cmd *cobra.Command, args []string) error {
 		}
 		batch := pages[i:end]
 		spin := startSpinner(fmt.Sprintf("Checking pages %d-%d for contradictions...", i+1, end))
-		// Phase B Task 5: schema.Bundled() temporary; Phase C wires
-		// the activeSchema global through cmd/root.go's loadConfig.
-		result, err := wiki.DetectContradictions(ctx, llmClient, batch, schema.Bundled())
+		// Phase C Task 6: activeSchema is loaded by cmd/root.go's
+		// loadConfig from AGENTS.md / CLAUDE.md, falling back to
+		// schema.Bundled() when neither file exists.
+		result, err := wiki.DetectContradictions(ctx, llmClient, batch, activeSchema)
 		spin.Stop()
 		if err != nil {
 			fmt.Printf("  WARN: contradiction check failed: %v\n", err)

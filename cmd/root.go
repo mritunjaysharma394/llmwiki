@@ -10,6 +10,7 @@ import (
 	"github.com/mritunjaysharma394/llmwiki/internal/cliutil"
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 	"github.com/mritunjaysharma394/llmwiki/internal/version"
 	"github.com/spf13/cobra"
 )
@@ -125,9 +126,16 @@ func (c IngestConfig) UpdateExistingOrDefault() bool {
 }
 
 var (
-	cfg              *Config
-	llmClient        llm.Client
-	database         *db.DB
+	cfg       *Config
+	llmClient llm.Client
+	database  *db.DB
+	// activeSchema is the user-editable schema doc loaded by loadConfig
+	// from AGENTS.md (canonical) or CLAUDE.md (Claude-Code-native) at
+	// the wiki root. When neither file exists, schema.Load returns
+	// schema.Bundled() so pre-v0.7 wikis see zero behaviour change.
+	// Threaded into every wiki entrypoint (ingest, ask, promote, lint)
+	// to drive prompt rendering and ontology shape.
+	activeSchema     schema.Schema
 	overrideProvider string
 	overrideModel    string
 )
@@ -185,7 +193,27 @@ func loadConfig() error {
 		cfg.LLM.OllamaURL = cfg.Providers.Ollama.URL
 	}
 	applyIngestDefaults(&cfg.Ingest)
-	var err error
+	// Load the user-editable schema doc from the wiki root, falling
+	// back to schema.Bundled() when neither AGENTS.md nor CLAUDE.md is
+	// present (a v0.6 wiki opening under v0.7). Validate immediately —
+	// a malformed schema fails at load-time with file:line, not at
+	// first ingest, so the user gets the error before the LLM call
+	// happens. The chdir into LLMWIKI_DIR has already settled in
+	// PersistentPreRunE above, so "." here is the wiki root.
+	sch, err := schema.Load(".")
+	if err != nil {
+		return cliutil.Wrap(
+			"loading schema doc (AGENTS.md or CLAUDE.md)",
+			err,
+			"run `llmwiki schema validate` for the structured error; or `llmwiki init --rewrite-schema` to overwrite with the bundled default")
+	}
+	if verr := sch.Validate(); verr != nil {
+		return cliutil.Wrap(
+			"validating schema doc",
+			verr,
+			"edit the file to fix; run `llmwiki schema validate` to iterate")
+	}
+	activeSchema = sch
 	database, err = db.Open(cfg.Wiki.DBPath)
 	if err != nil {
 		return cliutil.Wrap("opening database",

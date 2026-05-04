@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/mritunjaysharma394/llmwiki/internal/cliutil"
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 	"github.com/spf13/cobra"
 )
 
@@ -325,5 +328,196 @@ update_existing_max_candidates_per_source = 7
 	}
 	if !got.Ingest.UpdateExistingOrDefault() {
 		t.Error("UpdateExistingOrDefault should be true after explicit decode")
+	}
+}
+
+// schemaTestConfig is the minimal config.toml body the activeSchema
+// loadConfig tests below need. Uses ollama so loadConfig doesn't trip
+// on a missing API key env var — schema loading is the unit under test,
+// not provider selection.
+const schemaTestConfig = `[llm]
+provider = "ollama"
+model = "x"
+
+[wiki]
+wiki_dir = ".llmwiki/wiki"
+raw_dir = ".llmwiki/raw"
+db_path = ".llmwiki/wiki.db"
+`
+
+// validSchemaDoc is a syntactically-valid AGENTS.md / CLAUDE.md body
+// used by the activeSchema tests below. It mirrors the bundled default
+// in shape but distinguishes itself in the Domain section so the hash
+// differs from schema.Bundled().Hash().
+const validSchemaDoc = `---
+schema_version: 1
+generator: llmwiki-test
+---
+
+# llmwiki schema (test fixture)
+
+## Domain
+
+Test domain for activeSchema unit tests.
+
+## Page ontology
+
+  - title         (string)         the page's primary key; unique per wiki
+  - body          (markdown)       the page's narrative
+  - evidence      (list of quotes) verbatim spans from sources; required, >= 1
+  - links         (list)           Obsidian wikilinks declared structurally
+  - sources       (list of paths)  derived from evidence; emitted by WritePage
+  - tags          (list of strings) Obsidian/Dataview-friendly
+  - created       (date)           first-ingest date
+  - updated_at    (RFC3339 ts)     last-write timestamp
+  - content_hash  (sha256)         body hash; recomputed at every write
+  - source_ids    (list of int)    DB row IDs backing this page
+
+## Ingest prompt
+
+Test ingest prompt body. {{domain}} {{existing_titles}}
+
+## Update-existing prompt
+
+Test update prompt body. {{domain}} {{existing_page_body}} {{existing_evidence}}
+
+## Ask prompt
+
+Test ask prompt body. {{domain}}
+
+## Contradiction prompt
+
+Test contradiction prompt body.
+
+## Promote rewrite prompt
+
+Test promote rewrite prompt. {{question}} {{answer_body}} {{evidence_quotes}}
+
+## Lint contradictions prompt
+
+Test lint contradictions prompt body.
+`
+
+// TestLoadConfig_LoadsAGENTSMdWhenPresent writes a fixture AGENTS.md to
+// the wiki root and asserts loadConfig parses it into activeSchema with
+// DocPath == "AGENTS.md" and Hash() == sha256(<file bytes>). This is the
+// happy path: the user has an AGENTS.md and it drives every wiki entrypoint.
+func TestLoadConfig_LoadsAGENTSMdWhenPresent(t *testing.T) {
+	chdirTemp(t)
+	resetProviderFlags(t)
+	writeMinimalConfig(t, schemaTestConfig)
+	if err := os.WriteFile("AGENTS.md", []byte(validSchemaDoc), 0644); err != nil {
+		t.Fatalf("writing AGENTS.md: %v", err)
+	}
+	if err := loadConfig(); err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if activeSchema.DocPath != "AGENTS.md" {
+		t.Errorf("activeSchema.DocPath = %q, want %q", activeSchema.DocPath, "AGENTS.md")
+	}
+	wantHash := fmt.Sprintf("%x", sha256.Sum256([]byte(validSchemaDoc)))
+	if got := activeSchema.Hash(); got != wantHash {
+		t.Errorf("activeSchema.Hash() = %q, want %q (sha256 of fixture bytes)", got, wantHash)
+	}
+}
+
+// TestLoadConfig_FallsBackToBundledWhenAGENTSMdAbsent confirms a wiki
+// with no AGENTS.md (and no CLAUDE.md) gets the bundled default. This
+// is the v0.6 -> v0.7 compatibility surface: pre-v0.7 wikis see zero
+// behaviour change.
+func TestLoadConfig_FallsBackToBundledWhenAGENTSMdAbsent(t *testing.T) {
+	chdirTemp(t)
+	resetProviderFlags(t)
+	writeMinimalConfig(t, schemaTestConfig)
+	if err := loadConfig(); err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if activeSchema.DocPath != "" {
+		t.Errorf("activeSchema.DocPath = %q, want \"\" (bundled has no on-disk path)", activeSchema.DocPath)
+	}
+	if got, want := activeSchema.Hash(), schema.Bundled().Hash(); got != want {
+		t.Errorf("activeSchema.Hash() = %q, want bundled hash %q", got, want)
+	}
+}
+
+// TestLoadConfig_LoadsCLAUDEMd_WhenAGENTSMdAbsentButCLAUDEMdPresent
+// verifies the dual-filename scan: CLAUDE.md (Claude Code native) is
+// read when AGENTS.md (the canonical multi-vendor name) is absent.
+// Phase A's SchemaFilenames slice locks the [AGENTS.md, CLAUDE.md] order;
+// this test pins the fallback half of that contract from the cmd/ side.
+func TestLoadConfig_LoadsCLAUDEMd_WhenAGENTSMdAbsentButCLAUDEMdPresent(t *testing.T) {
+	chdirTemp(t)
+	resetProviderFlags(t)
+	writeMinimalConfig(t, schemaTestConfig)
+	if err := os.WriteFile("CLAUDE.md", []byte(validSchemaDoc), 0644); err != nil {
+		t.Fatalf("writing CLAUDE.md: %v", err)
+	}
+	if err := loadConfig(); err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if activeSchema.DocPath != "CLAUDE.md" {
+		t.Errorf("activeSchema.DocPath = %q, want %q", activeSchema.DocPath, "CLAUDE.md")
+	}
+	wantHash := fmt.Sprintf("%x", sha256.Sum256([]byte(validSchemaDoc)))
+	if got := activeSchema.Hash(); got != wantHash {
+		t.Errorf("activeSchema.Hash() = %q, want %q", got, wantHash)
+	}
+}
+
+// TestLoadConfig_AGENTSMdValidationFails_ErrorsLoudly writes an AGENTS.md
+// missing the `## Ingest prompt` section and asserts loadConfig returns
+// an error mentioning the missing section. This is the load-time
+// validation contract: a malformed schema fails before the first LLM
+// call, not at first ingest.
+func TestLoadConfig_AGENTSMdValidationFails_ErrorsLoudly(t *testing.T) {
+	chdirTemp(t)
+	resetProviderFlags(t)
+	writeMinimalConfig(t, schemaTestConfig)
+	// Strip the `## Ingest prompt` section (and its body) from the
+	// fixture so Parse/Validate must surface a "required section
+	// missing" error.
+	const start = "## Ingest prompt"
+	const end = "## Update-existing prompt"
+	si := strings.Index(validSchemaDoc, start)
+	ei := strings.Index(validSchemaDoc, end)
+	if si < 0 || ei < 0 || ei <= si {
+		t.Fatalf("fixture sanity: cannot locate Ingest/Update sections in validSchemaDoc")
+	}
+	malformed := validSchemaDoc[:si] + validSchemaDoc[ei:]
+	if err := os.WriteFile("AGENTS.md", []byte(malformed), 0644); err != nil {
+		t.Fatalf("writing malformed AGENTS.md: %v", err)
+	}
+	err := loadConfig()
+	if err == nil {
+		t.Fatal("loadConfig succeeded on malformed AGENTS.md; want error")
+	}
+	rendered := cliutil.Render(err)
+	if !strings.Contains(rendered, "Ingest prompt") {
+		t.Errorf("rendered error does not mention missing 'Ingest prompt' section:\n%s", rendered)
+	}
+}
+
+// TestLoadConfig_AGENTSMdHashStable_AcrossReads calls loadConfig twice
+// on the same fixture and asserts activeSchema.Hash() is identical both
+// times. This is the stability guard for db.schema_hash queries — if a
+// re-read produced a different hash for the same bytes, every status /
+// lint drift surface would false-positive.
+func TestLoadConfig_AGENTSMdHashStable_AcrossReads(t *testing.T) {
+	chdirTemp(t)
+	resetProviderFlags(t)
+	writeMinimalConfig(t, schemaTestConfig)
+	if err := os.WriteFile("AGENTS.md", []byte(validSchemaDoc), 0644); err != nil {
+		t.Fatalf("writing AGENTS.md: %v", err)
+	}
+	if err := loadConfig(); err != nil {
+		t.Fatalf("loadConfig (first): %v", err)
+	}
+	first := activeSchema.Hash()
+	if err := loadConfig(); err != nil {
+		t.Fatalf("loadConfig (second): %v", err)
+	}
+	second := activeSchema.Hash()
+	if first != second {
+		t.Errorf("activeSchema.Hash() unstable across reads:\n  first  = %s\n  second = %s", first, second)
 	}
 }
