@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-05-04
+
+### Added
+- `llmwiki mcp` — MCP stdio server exposing six tools (`ingest`, `ask`,
+  `list_pages`, `read_page`, `write_page`, `lint`). `write_page` runs every
+  proposed page through the same evidence-validation pipeline as
+  `llmwiki ingest`; quotes that don't substring-match the named source are
+  rejected with a structured error.
+- Google Gemini provider (`--provider gemini`, default `gemini-2.0-flash`).
+  Free tier, 1M context, no credit card. Now the recommended onboarding
+  default.
+- Generic OpenAI-compatible provider (`--provider openai-compatible`).
+  Configurable `base_url` + `api_key_env` + `default_model`. Tested against
+  Groq, OpenRouter, Together, Cerebras, and Mistral La Plateforme.
+- Obsidian-native disk layout: `[[wikilinks]]` between page bodies, an
+  auto-regenerated `.llmwiki/wiki/index.md` hub, an append-only
+  `.llmwiki/wiki/log.md` chronicle, and `tags` / `sources` / `created`
+  frontmatter keys spelled the way Obsidian's Dataview plugin expects.
+- `[providers]` config block with per-provider knobs
+  (`base_url`, `api_key_env`, `default_model`, `url`).
+
+### Changed
+- `llmwiki init` walkthrough recommends Gemini first (was Anthropic).
+  Existing users with `provider = "anthropic"` keep working unchanged.
+- `writePagesTool` description nudges the model toward `[[Page Title]]`
+  syntax for cross-page references.
+
+### Notes
+- No schema migration. `PRAGMA user_version` stays at 3.
+- Cheap-provider wikis end up sparser than Haiku wikis but never less
+  honest — the validator drops unverified quotes on every provider equally.
+
 ## [1.0.0-rc.1] — 2026-05-04
 
 ### Added
@@ -75,7 +107,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   database.
 - Cassette-based LLM client for record/replay testing.
 
-[Unreleased]: https://github.com/mritunjaysharma394/llmwiki/compare/v1.0.0-rc.1...HEAD
+[Unreleased]: https://github.com/mritunjaysharma394/llmwiki/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v1.1.0
 [1.0.0-rc.1]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v1.0.0-rc.1
 [0.2.0]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v0.2.0
 [0.1.0]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v0.1.0
