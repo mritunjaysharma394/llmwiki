@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/mattn/go-isatty"
 	"github.com/mritunjaysharma394/llmwiki/internal/cliutil"
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 	"github.com/spf13/cobra"
 )
 
@@ -163,6 +165,8 @@ var initCmd = &cobra.Command{
 
 func init() {
 	initCmd.Flags().String("provider", "", "default LLM provider: gemini|anthropic|openai-compatible|ollama (empty = gemini)")
+	initCmd.Flags().Bool("rewrite-schema", false, "Overwrite an existing schema doc with the bundled default. By default `init` leaves an existing AGENTS.md/CLAUDE.md alone.")
+	initCmd.Flags().String("schema-file", "AGENTS.md", "Filename to write the bundled schema to: AGENTS.md (default, multi-vendor) or CLAUDE.md (Claude-Code-only).")
 }
 
 // templateForProvider picks the config template body for a given --provider
@@ -210,6 +214,46 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 	}
 	fmt.Printf("Initialized wiki at %s\n", dir)
+
+	// Write the schema doc at the wiki root (NOT inside .llmwiki/, per Q1 —
+	// AGENTS.md is the multi-vendor convention, discoverable on `ls`). The
+	// idempotency contract: an existing schema doc (under any name in the
+	// discovery list — AGENTS.md or CLAUDE.md) is left alone so a re-run for
+	// provider-key fixes doesn't clobber user edits. --rewrite-schema is the
+	// explicit opt-in for "give me the bundled v0.7 default back."
+	rewriteSchema, _ := cmd.Flags().GetBool("rewrite-schema")
+	schemaFile, _ := cmd.Flags().GetString("schema-file")
+	if schemaFile == "" {
+		schemaFile = "AGENTS.md"
+	}
+	allowed := false
+	for _, name := range schema.SchemaFilenames {
+		if schemaFile == name {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return cliutil.Wrap(
+			fmt.Sprintf("--schema-file=%q is not a recognised schema filename", schemaFile),
+			nil,
+			fmt.Sprintf("use one of: %s", strings.Join(schema.SchemaFilenames, ", ")),
+		)
+	}
+	schemaExists := false
+	for _, name := range schema.SchemaFilenames {
+		if _, err := os.Stat(name); err == nil {
+			schemaExists = true
+			break
+		}
+	}
+	if !schemaExists || rewriteSchema {
+		if err := os.WriteFile(schemaFile, schema.DefaultDoc, 0644); err != nil {
+			return fmt.Errorf("writing %s: %w", schemaFile, err)
+		}
+		fmt.Printf("Wrote default schema at %s\n", schemaFile)
+		fmt.Println("  (defines page shape and prompts; edit to fit your domain)")
+	}
 
 	// Surface a missing-key UserError matching the chosen provider so the very
 	// first run produces a copy-pasteable next step. The empty/default case is
