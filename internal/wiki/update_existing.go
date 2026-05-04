@@ -369,7 +369,7 @@ func finishUpdateCandidate(
 		}
 	}
 
-	if err := WritePage(updated, cfg.WikiDir); err != nil {
+	if err := WritePageWithSchema(updated, cfg.WikiDir, opts.Schema); err != nil {
 		writePageUpdateLog(database, cand.ID, sourceID, cand.ContentHash, "", "failed",
 			fmt.Sprintf("write-page-error: %v", err), 0, 0)
 		return candidateOutcome{kind: "failed", reason: fmt.Sprintf("write-page-error: %v", err)}

@@ -154,7 +154,7 @@ func MigratePage(
 		}
 	}
 
-	if err := WritePage(*proposed, wikiDir); err != nil {
+	if err := WritePageWithSchema(*proposed, wikiDir, activeSchema); err != nil {
 		return MigratePageOutcome{Kind: "failed", Reason: fmt.Sprintf("WritePage: %v", err)}, nil
 	}
 	rec := db.PageRecord{

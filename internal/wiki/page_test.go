@@ -3,9 +3,12 @@ package wiki
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 )
 
 func TestWriteReadPageWithEvidence(t *testing.T) {
@@ -328,3 +331,259 @@ func TestPage_CreatedIsDateOnly(t *testing.T) {
 		t.Errorf("updated_at RFC3339 should still be present; file:\n%s", s)
 	}
 }
+
+// ---------- Sub-project 7 / Phase J Task 15 ----------
+//
+// WritePageWithSchema reads field-name overrides + declared order from
+// Schema.Ontology. The legacy WritePage shim delegates with
+// schema.Bundled() so pre-v0.7 callers see no behaviour change. The
+// canonical struct field carrying evidence quotes (`Page.Evidence`) is
+// fixed; the rename is a name-string mapping over disk emission only.
+
+// canonicalSchemaWithDeclared builds a Schema with the bundled canonical
+// ontology field list, applying any per-canonical declared-name override
+// from the supplied map. Order matches schema.Bundled() (i.e. v0.6
+// emission order).
+func canonicalSchemaWithDeclared(t *testing.T, decl map[string]string) schema.Schema {
+	t.Helper()
+	s := schema.Bundled()
+	out := s
+	out.Ontology.Fields = make([]schema.OntologyField, len(s.Ontology.Fields))
+	copy(out.Ontology.Fields, s.Ontology.Fields)
+	for i := range out.Ontology.Fields {
+		c := out.Ontology.Fields[i].CanonicalName
+		if d, ok := decl[c]; ok && d != "" {
+			out.Ontology.Fields[i].DeclaredName = d
+		}
+	}
+	return out
+}
+
+// TestWritePage_BundledSchema_ProducesV06FrontmatterByteIdentical pins
+// the load-bearing backwards-compat contract: writing a page through
+// WritePageWithSchema with schema.Bundled() produces frontmatter
+// byte-identical to v0.6's hard-coded WritePage. A v0.6 wiki opening
+// under v0.7 with no AGENTS.md sees zero on-disk drift.
+func TestWritePage_BundledSchema_ProducesV06FrontmatterByteIdentical(t *testing.T) {
+	dir := t.TempDir()
+	p := Page{
+		Title:       "Compat",
+		Body:        "# Body\n\nHello.\n",
+		Links:       []Link{{To: "Other Page", Type: "supports"}},
+		SourceIDs:   []int64{1, 2},
+		ContentHash: "abc",
+		UpdatedAt:   time.Date(2026, 5, 4, 10, 30, 0, 0, time.UTC),
+		Evidence: []Evidence{
+			{Quote: "first quote", LineStart: 3, LineEnd: 3, SourceFilePath: "internal/db/db.go"},
+		},
+		Tags:    []string{"llmwiki", "ingest"},
+		Sources: []string{"internal/db/db.go"},
+		Created: time.Date(2026, 5, 4, 0, 0, 0, 0, time.UTC),
+	}
+	if err := WritePageWithSchema(p, dir, schema.Bundled()); err != nil {
+		t.Fatalf("WritePageWithSchema: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "Compat.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "---\n" +
+		"title: Compat\n" +
+		"updated_at: 2026-05-04T10:30:00Z\n" +
+		"content_hash: abc\n" +
+		"source_ids: [1, 2]\n" +
+		"tags: [llmwiki, ingest]\n" +
+		"sources: [internal/db/db.go]\n" +
+		"created: 2026-05-04\n" +
+		"updated: 2026-05-04\n" +
+		"links:\n" +
+		"  - to: Other Page\n" +
+		"    type: supports\n" +
+		"evidence:\n" +
+		"  - quote: \"first quote\"\n" +
+		"    line_start: 3\n" +
+		"    line_end: 3\n" +
+		"    source_file: internal/db/db.go\n" +
+		"---\n\n" +
+		"# Body\n\nHello.\n"
+	if string(got) != want {
+		t.Errorf("bundled-schema emission drifted from v0.6\n--- want ---\n%s\n--- got ---\n%s", want, string(got))
+	}
+}
+
+// TestWritePage_RenamedSchema_EmitsRenamedKeys: schema renames evidence
+// → citations; the on-disk frontmatter key reflects the rename even
+// though Page.Evidence is the struct field carrying the quotes.
+func TestWritePage_RenamedSchema_EmitsRenamedKeys(t *testing.T) {
+	dir := t.TempDir()
+	sch := canonicalSchemaWithDeclared(t, map[string]string{"evidence": "citations"})
+	p := Page{
+		Title:       "Rename",
+		Body:        "body\n",
+		ContentHash: "h",
+		UpdatedAt:   time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC),
+		Evidence: []Evidence{
+			{Quote: "q1", LineStart: 1, LineEnd: 1, SourceFilePath: "internal/db/db.go"},
+		},
+	}
+	if err := WritePageWithSchema(p, dir, sch); err != nil {
+		t.Fatalf("WritePageWithSchema: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "Rename.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	if !strings.Contains(s, "citations:\n  - quote: ") {
+		t.Errorf("expected `citations:` section; file:\n%s", s)
+	}
+	if strings.Contains(s, "evidence:\n  - quote:") {
+		t.Errorf("evidence: must NOT appear when schema renamed it; file:\n%s", s)
+	}
+}
+
+// TestWritePage_ReorderedSchema_EmitsInDeclaredOrder: reordering
+// [evidence, title, body] in the schema's ontology slice puts evidence
+// before title in the on-disk frontmatter.
+func TestWritePage_ReorderedSchema_EmitsInDeclaredOrder(t *testing.T) {
+	dir := t.TempDir()
+	sch := schema.Bundled()
+	// Reorder: pull `evidence` to the front, then `title`, then everything
+	// else preserving their original relative order.
+	var ev, ti schema.OntologyField
+	rest := make([]schema.OntologyField, 0, len(sch.Ontology.Fields))
+	for _, f := range sch.Ontology.Fields {
+		switch f.CanonicalName {
+		case "evidence":
+			ev = f
+		case "title":
+			ti = f
+		default:
+			rest = append(rest, f)
+		}
+	}
+	reordered := append([]schema.OntologyField{ev, ti}, rest...)
+	sch.Ontology.Fields = reordered
+	p := Page{
+		Title:       "Reorder",
+		Body:        "b\n",
+		ContentHash: "h",
+		UpdatedAt:   time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC),
+		Evidence: []Evidence{
+			{Quote: "q1", LineStart: 1, LineEnd: 1, SourceFilePath: "internal/db/db.go"},
+		},
+	}
+	if err := WritePageWithSchema(p, dir, sch); err != nil {
+		t.Fatalf("WritePageWithSchema: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "Reorder.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	evIdx := strings.Index(s, "evidence:")
+	tiIdx := strings.Index(s, "title:")
+	if evIdx < 0 || tiIdx < 0 {
+		t.Fatalf("expected both evidence: and title: in frontmatter; file:\n%s", s)
+	}
+	if evIdx >= tiIdx {
+		t.Errorf("expected evidence: before title:; got evIdx=%d tiIdx=%d\n%s", evIdx, tiIdx, s)
+	}
+}
+
+// TestWritePage_ExtraFrontmatterPassThrough_DeclaredButUnvalidated:
+// the schema declares a `priority` extra field; the Page struct doesn't
+// carry one (Page.ExtraFrontmatter is nil); WritePageWithSchema must
+// NOT fabricate a `priority:` line. The pass-through path is for
+// reading; writing only emits values that already exist.
+func TestWritePage_ExtraFrontmatterPassThrough_DeclaredButUnvalidated(t *testing.T) {
+	dir := t.TempDir()
+	sch := schema.Bundled()
+	// Append a non-canonical declared field to the ontology.
+	sch.Ontology.Fields = append(sch.Ontology.Fields, schema.OntologyField{
+		CanonicalName: "priority",
+		DeclaredName:  "priority",
+		Type:          "string",
+		Description:   "user-declared extra",
+	})
+	p := Page{
+		Title:       "Extra",
+		Body:        "b\n",
+		ContentHash: "h",
+		UpdatedAt:   time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC),
+	}
+	if err := WritePageWithSchema(p, dir, sch); err != nil {
+		t.Fatalf("WritePageWithSchema: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "Extra.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "priority:") {
+		t.Errorf("WritePage must NOT fabricate priority: when Page struct + ExtraFrontmatter don't carry it; file:\n%s", string(data))
+	}
+}
+
+// TestWritePage_RenamedSchema_TitleNotRenamed_StillWritesTitle: only
+// `evidence` is renamed; `title` stays canonical and emits as `title:`.
+func TestWritePage_RenamedSchema_TitleNotRenamed_StillWritesTitle(t *testing.T) {
+	dir := t.TempDir()
+	sch := canonicalSchemaWithDeclared(t, map[string]string{"evidence": "citations"})
+	p := Page{
+		Title:       "Partial",
+		Body:        "b\n",
+		ContentHash: "h",
+		UpdatedAt:   time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC),
+	}
+	if err := WritePageWithSchema(p, dir, sch); err != nil {
+		t.Fatalf("WritePageWithSchema: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "Partial.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "title: Partial\n") {
+		t.Errorf("expected unrenamed title:; file:\n%s", string(data))
+	}
+}
+
+// TestWritePage_BackwardsCompatShim_NoSchemaArg_UsesBundled: the legacy
+// WritePage(p, dir) signature delegates with schema.Bundled() so callers
+// that haven't yet adopted the schema-aware entrypoint see byte-for-byte
+// identical output.
+func TestWritePage_BackwardsCompatShim_NoSchemaArg_UsesBundled(t *testing.T) {
+	p := Page{
+		Title:       "Shim",
+		Body:        "b\n",
+		ContentHash: "h",
+		UpdatedAt:   time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC),
+		Evidence: []Evidence{
+			{Quote: "q1", LineStart: 1, LineEnd: 1, SourceFilePath: "internal/db/db.go"},
+		},
+		Tags:    []string{"llmwiki", "ingest"},
+		Sources: []string{"internal/db/db.go"},
+		Created: time.Date(2026, 5, 4, 0, 0, 0, 0, time.UTC),
+	}
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+	if err := WritePage(p, dirA); err != nil {
+		t.Fatalf("WritePage shim: %v", err)
+	}
+	if err := WritePageWithSchema(p, dirB, schema.Bundled()); err != nil {
+		t.Fatalf("WritePageWithSchema: %v", err)
+	}
+	a, err := os.ReadFile(filepath.Join(dirA, "Shim.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dirB, "Shim.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(a) != string(b) {
+		t.Errorf("WritePage shim != WritePageWithSchema(_, _, Bundled())\nshim:\n%s\nschema-aware:\n%s", string(a), string(b))
+	}
+}
+
+// reflect is used by Task 16's round-trip tests.
+var _ = reflect.DeepEqual

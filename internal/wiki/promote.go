@@ -309,7 +309,7 @@ func PromoteAnswer(ctx context.Context, cfg IngestSourceConfig, database *db.DB,
 		return out, fmt.Errorf("mkdir wiki dir: %w", err)
 	}
 	pagePath := PagePath(cfg.WikiDir, page.Title)
-	if err := WritePage(page, cfg.WikiDir); err != nil {
+	if err := WritePageWithSchema(page, cfg.WikiDir, opts.Schema); err != nil {
 		return out, fmt.Errorf("writing page: %w", err)
 	}
 	rec := db.PageRecord{

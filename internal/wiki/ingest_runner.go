@@ -407,7 +407,7 @@ func IngestSource(ctx context.Context, cfg IngestSourceConfig, database *db.DB, 
 		}
 		totalEvidence += len(allPages[i].Evidence)
 		path := PagePath(cfg.WikiDir, allPages[i].Title)
-		if err := WritePage(allPages[i], cfg.WikiDir); err != nil {
+		if err := WritePageWithSchema(allPages[i], cfg.WikiDir, opts.Schema); err != nil {
 			return out, fmt.Errorf("writing page %q: %w", allPages[i].Title, err)
 		}
 		rec := db.PageRecord{

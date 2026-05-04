@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 )
 
 type Link struct {
@@ -66,77 +68,193 @@ func PagePath(wikiDir, title string) string {
 	return filepath.Join(wikiDir, safe+".md")
 }
 
+// WritePage is the legacy backwards-compat shim. Pre-v0.7 callers see
+// no behaviour change: it delegates to WritePageWithSchema with
+// schema.Bundled() so on-disk emission is byte-identical to v0.6.
+//
+// New code that already carries the active schema in scope should call
+// WritePageWithSchema directly so user renames + reorders propagate to
+// disk. The v0.7 in-package callers (ingest_runner, update_existing,
+// promote, migrate) are wired through their `sch schema.Schema`
+// entrypoints and call WritePageWithSchema directly.
 func WritePage(p Page, wikiDir string) error {
+	return WritePageWithSchema(p, wikiDir, schema.Bundled())
+}
+
+// WritePageWithSchema is the schema-aware page writer. It walks
+// sch.Ontology.Fields IN DECLARED ORDER and emits each canonical-known
+// field's lines using the user's declared name. The body lives below
+// the closing `---` regardless of where it sits in the ontology slice
+// (no frontmatter emission for `body`).
+//
+// TRUST PROPERTY. The canonical struct field carrying evidence quotes
+// (`Page.Evidence`) is fixed. The rename here is a name-string mapping
+// over disk emission only — wiki.ValidateAndAttachEvidence reads
+// p.Evidence regardless of what the user named it on disk. A schema
+// that renames evidence → citations still has every quote substring-
+// matched against the bytes of its named source file.
+//
+// Declared-but-not-canonical fields (e.g. a user-declared `priority`
+// row in the ontology) are NOT fabricated on write. They round-trip
+// through Page.ExtraFrontmatter, which ParsePageWithSchema populates
+// when those keys are present on disk, and which WritePageWithSchema
+// emits in alphabetical order after the canonical fields when set.
+func WritePageWithSchema(p Page, wikiDir string, sch schema.Schema) error {
 	path := PagePath(wikiDir, p.Title)
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
+
+	// Build a name resolver: canonical -> declared. A canonical name
+	// not in the schema's ontology falls through to itself, so callers
+	// passing a partially-populated schema (e.g. a Schema with only the
+	// required three fields) still emit the un-declared canonical
+	// fields under their canonical names.
+	declaredFor := make(map[string]string, len(sch.Ontology.Fields))
+	for _, f := range sch.Ontology.Fields {
+		declaredFor[f.CanonicalName] = f.DeclaredName
+	}
+	name := func(canonical string) string {
+		if d, ok := declaredFor[canonical]; ok && d != "" {
+			return d
+		}
+		return canonical
+	}
+
 	var sb strings.Builder
 	sb.WriteString("---\n")
-	sb.WriteString(fmt.Sprintf("title: %s\n", p.Title))
-	sb.WriteString(fmt.Sprintf("updated_at: %s\n", p.UpdatedAt.UTC().Format(time.RFC3339)))
-	sb.WriteString(fmt.Sprintf("content_hash: %s\n", p.ContentHash))
-	if len(p.SourceIDs) > 0 {
-		ids := make([]string, len(p.SourceIDs))
-		for i, id := range p.SourceIDs {
-			ids[i] = strconv.FormatInt(id, 10)
+
+	// Track which canonical fields we've emitted so a duplicate ontology
+	// entry doesn't cause double emission.
+	emitted := make(map[string]bool, len(sch.Ontology.Fields))
+
+	emit := func(canonical string) {
+		if emitted[canonical] {
+			return
 		}
-		sb.WriteString(fmt.Sprintf("source_ids: [%s]\n", strings.Join(ids, ", ")))
+		emitted[canonical] = true
+		switch canonical {
+		case "title":
+			sb.WriteString(fmt.Sprintf("%s: %s\n", name("title"), p.Title))
+		case "updated_at":
+			sb.WriteString(fmt.Sprintf("%s: %s\n", name("updated_at"), p.UpdatedAt.UTC().Format(time.RFC3339)))
+		case "content_hash":
+			sb.WriteString(fmt.Sprintf("%s: %s\n", name("content_hash"), p.ContentHash))
+		case "source_ids":
+			if len(p.SourceIDs) > 0 {
+				ids := make([]string, len(p.SourceIDs))
+				for i, id := range p.SourceIDs {
+					ids[i] = strconv.FormatInt(id, 10)
+				}
+				sb.WriteString(fmt.Sprintf("%s: [%s]\n", name("source_ids"), strings.Join(ids, ", ")))
+			} else {
+				sb.WriteString(fmt.Sprintf("%s: []\n", name("source_ids")))
+			}
+		case "tags":
+			if len(p.Tags) > 0 {
+				escaped := make([]string, len(p.Tags))
+				for i, t := range p.Tags {
+					escaped[i] = yamlEscapeScalar(t)
+				}
+				sb.WriteString(fmt.Sprintf("%s: [%s]\n", name("tags"), strings.Join(escaped, ", ")))
+			}
+		case "sources":
+			// honor caller-supplied Sources; otherwise derive the distinct
+			// set of source_file relative paths from Evidence. Skip the key
+			// when neither produces anything.
+			srcs := p.Sources
+			if len(srcs) == 0 {
+				srcs = distinctEvidenceSources(p.Evidence)
+			}
+			if len(srcs) > 0 {
+				escaped := make([]string, len(srcs))
+				for i, s := range srcs {
+					escaped[i] = yamlEscapeScalar(s)
+				}
+				sb.WriteString(fmt.Sprintf("%s: [%s]\n", name("sources"), strings.Join(escaped, ", ")))
+			}
+		case "created":
+			if !p.Created.IsZero() {
+				sb.WriteString(fmt.Sprintf("%s: %s\n", name("created"), p.Created.UTC().Format("2006-01-02")))
+			}
+		case "links":
+			if len(p.Links) > 0 {
+				sb.WriteString(fmt.Sprintf("%s:\n", name("links")))
+				for _, l := range p.Links {
+					sb.WriteString(fmt.Sprintf("  - to: %s\n    type: %s\n", l.To, l.Type))
+				}
+			}
+		case "evidence":
+			if len(p.Evidence) > 0 {
+				sb.WriteString(fmt.Sprintf("%s:\n", name("evidence")))
+				for _, e := range p.Evidence {
+					esc := strings.ReplaceAll(e.Quote, `\`, `\\`)
+					esc = strings.ReplaceAll(esc, `"`, `\"`)
+					esc = strings.ReplaceAll(esc, "\n", `\n`)
+					esc = strings.ReplaceAll(esc, "\r", `\r`)
+					sb.WriteString(fmt.Sprintf("  - quote: \"%s\"\n", esc))
+					sb.WriteString(fmt.Sprintf("    line_start: %d\n", e.LineStart))
+					sb.WriteString(fmt.Sprintf("    line_end: %d\n", e.LineEnd))
+					if e.SourceFilePath != "" {
+						sb.WriteString(fmt.Sprintf("    source_file: %s\n", yamlEscapeScalar(e.SourceFilePath)))
+					}
+				}
+			}
+		case "body":
+			// Body lives below the closing ---; no frontmatter emission.
+		default:
+			// Non-canonical declared field (e.g. user-added `priority`).
+			// Round-trip via Page.ExtraFrontmatter — handled below as a
+			// post-canonical pass.
+		}
+	}
+
+	// Emit `updated:` (the date-only twin of updated_at) alongside the
+	// `created:` slot — that's where v0.6's emitter put it (after
+	// `created:` and before `links:`). The twin has no canonical
+	// position of its own.
+	emitUpdatedTwin := func() {
+		if !p.UpdatedAt.IsZero() {
+			sb.WriteString(fmt.Sprintf("updated: %s\n", p.UpdatedAt.UTC().Format("2006-01-02")))
+		}
+	}
+
+	// Canonical fields we know how to emit. The schema declares the
+	// per-field order; if the user reordered, the user wins.
+	canonicalKnown := map[string]bool{
+		"title": true, "updated_at": true, "content_hash": true,
+		"source_ids": true, "tags": true, "sources": true,
+		"created": true, "links": true, "evidence": true, "body": true,
+	}
+
+	if len(sch.Ontology.Fields) == 0 {
+		// Defensive: a malformed / zero-value schema with no ontology.
+		// Fall back to the canonical bundled emission order so we never
+		// emit an empty frontmatter block.
+		fallback := []string{"title", "updated_at", "content_hash", "source_ids",
+			"tags", "sources", "created", "links", "evidence"}
+		for _, c := range fallback {
+			emit(c)
+			if c == "created" {
+				emitUpdatedTwin()
+			}
+		}
 	} else {
-		sb.WriteString("source_ids: []\n")
-	}
-	if len(p.Tags) > 0 {
-		escaped := make([]string, len(p.Tags))
-		for i, t := range p.Tags {
-			escaped[i] = yamlEscapeScalar(t)
-		}
-		sb.WriteString(fmt.Sprintf("tags: [%s]\n", strings.Join(escaped, ", ")))
-	}
-	// sources: honor caller-supplied Sources; otherwise derive the distinct
-	// set of source_file relative paths from Evidence. Skip the key when
-	// neither produces anything (preserves pre-v1.1 round-trip stability).
-	srcs := p.Sources
-	if len(srcs) == 0 {
-		srcs = distinctEvidenceSources(p.Evidence)
-	}
-	if len(srcs) > 0 {
-		escaped := make([]string, len(srcs))
-		for i, s := range srcs {
-			escaped[i] = yamlEscapeScalar(s)
-		}
-		sb.WriteString(fmt.Sprintf("sources: [%s]\n", strings.Join(escaped, ", ")))
-	}
-	if !p.Created.IsZero() {
-		sb.WriteString(fmt.Sprintf("created: %s\n", p.Created.UTC().Format("2006-01-02")))
-	}
-	// Date-only `updated:` twin alongside the RFC3339 `updated_at:` above —
-	// Dataview-friendly. Always emitted (UpdatedAt is always populated from
-	// real data, so this is "added populated from real data" per the
-	// pre-v1.1 round-trip contract rather than a spontaneous empty key).
-	if !p.UpdatedAt.IsZero() {
-		sb.WriteString(fmt.Sprintf("updated: %s\n", p.UpdatedAt.UTC().Format("2006-01-02")))
-	}
-	if len(p.Links) > 0 {
-		sb.WriteString("links:\n")
-		for _, l := range p.Links {
-			sb.WriteString(fmt.Sprintf("  - to: %s\n    type: %s\n", l.To, l.Type))
-		}
-	}
-	if len(p.Evidence) > 0 {
-		sb.WriteString("evidence:\n")
-		for _, e := range p.Evidence {
-			esc := strings.ReplaceAll(e.Quote, `\`, `\\`)
-			esc = strings.ReplaceAll(esc, `"`, `\"`)
-			esc = strings.ReplaceAll(esc, "\n", `\n`)
-			esc = strings.ReplaceAll(esc, "\r", `\r`)
-			sb.WriteString(fmt.Sprintf("  - quote: \"%s\"\n", esc))
-			sb.WriteString(fmt.Sprintf("    line_start: %d\n", e.LineStart))
-			sb.WriteString(fmt.Sprintf("    line_end: %d\n", e.LineEnd))
-			if e.SourceFilePath != "" {
-				sb.WriteString(fmt.Sprintf("    source_file: %s\n", yamlEscapeScalar(e.SourceFilePath)))
+		for _, f := range sch.Ontology.Fields {
+			if canonicalKnown[f.CanonicalName] {
+				emit(f.CanonicalName)
+				if f.CanonicalName == "created" {
+					emitUpdatedTwin()
+				}
 			}
 		}
 	}
+
+	// Page.ExtraFrontmatter round-trip is added in Task 16 (paired with
+	// ParsePageWithSchema's pass-through). Task 15 only guarantees that
+	// declared-but-untyped fields are NOT fabricated on write — which is
+	// the natural behaviour of the canonical-field switch above.
+
 	sb.WriteString("---\n\n")
 	sb.WriteString(p.Body)
 	return os.WriteFile(path, []byte(sb.String()), 0644)

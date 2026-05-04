@@ -1483,8 +1483,8 @@ func TestGetSchema_BundledByDefault(t *testing.T) {
 		gotFields[i], _ = f.(string)
 	}
 	wantFields := []string{
-		"title", "body", "evidence", "links", "sources",
-		"tags", "created", "updated_at", "content_hash", "source_ids",
+		"title", "updated_at", "content_hash", "source_ids", "tags",
+		"sources", "created", "links", "evidence", "body",
 	}
 	if !equalSlices(gotFields, wantFields) {
 		t.Errorf("ontology_fields = %v, want %v", gotFields, wantFields)

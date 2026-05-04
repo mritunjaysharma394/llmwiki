@@ -22,15 +22,15 @@ This document controls what the LLM is *asked* and how the page is
 ## Page ontology
 
   - title         (string)         the page's primary key; unique per wiki
-  - body          (markdown)       the page's narrative
-  - evidence      (list of quotes) verbatim spans from sources; required, >= 1
-  - links         (list)           Obsidian wikilinks declared structurally
-  - sources       (list of paths)  derived from evidence; emitted by WritePage
-  - tags          (list of strings) Obsidian/Dataview-friendly
-  - created       (date)           first-ingest date
-  - updated_at    (RFC3339 ts)     last-write timestamp
+  - updated_at    (RFC3339 ts)     last-write timestamp; date-only `updated:` twin emitted alongside
   - content_hash  (sha256)         body hash; recomputed at every write
   - source_ids    (list of int)    DB row IDs backing this page
+  - tags          (list of strings) Obsidian/Dataview-friendly
+  - sources       (list of paths)  derived from evidence; emitted by WritePage
+  - created       (date)           first-ingest date
+  - links         (list)           Obsidian wikilinks declared structurally
+  - evidence      (list of quotes) verbatim spans from sources; required, >= 1
+  - body          (markdown)       the page's narrative; lives below the closing ---
 
 ## Ingest prompt
 
