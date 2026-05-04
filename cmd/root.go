@@ -311,6 +311,7 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(ingestCmd)
 	rootCmd.AddCommand(askCmd)
+	rootCmd.AddCommand(promoteCmd)
 	rootCmd.AddCommand(lintCmd)
 	rootCmd.AddCommand(mcpCmd)
 	rootCmd.AddCommand(statusCmd)
