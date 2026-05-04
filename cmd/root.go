@@ -120,6 +120,16 @@ var rootCmd = &cobra.Command{
 		case "init", "help", "version":
 			return nil
 		}
+		// LLMWIKI_DIR lets MCP clients (and `llmwiki mcp` users in
+		// general) point the server at a wiki living anywhere on disk
+		// without spawning the process from inside that directory. We
+		// chdir before loadConfig so the relative .llmwiki/config.toml
+		// lookup loadConfig does still works. Empty / unset -> no-op.
+		if dir := os.Getenv("LLMWIKI_DIR"); dir != "" {
+			if err := os.Chdir(dir); err != nil {
+				return fmt.Errorf("LLMWIKI_DIR=%q: %w", dir, err)
+			}
+		}
 		return loadConfig()
 	},
 }
@@ -302,6 +312,7 @@ func init() {
 	rootCmd.AddCommand(ingestCmd)
 	rootCmd.AddCommand(askCmd)
 	rootCmd.AddCommand(lintCmd)
+	rootCmd.AddCommand(mcpCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(versionCmd)
 }
