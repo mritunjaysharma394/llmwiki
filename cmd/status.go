@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 )
@@ -25,6 +26,16 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	fmt.Printf("saved answers:      %d\n", stats.SavedAnswers)
 	if !stats.LastIngest.IsZero() {
 		fmt.Printf("last ingest:        %s\n", stats.LastIngest.Format("2006-01-02 15:04:05 MST"))
+	}
+	if counts, err := database.CountPageUpdateLogByOutcome(); err != nil {
+		fmt.Fprintf(os.Stderr, "  WARN reading page_update_log: %v\n", err)
+	} else {
+		if updated := counts["updated"]; updated > 0 {
+			fmt.Printf("pages updated total: %d\n", updated)
+		}
+		if failed := counts["failed"]; failed > 0 {
+			fmt.Printf("pages update failed: %d\n", failed)
+		}
 	}
 	for _, ls := range stats.LargestSources {
 		fmt.Printf("largest source:     %s (%d files)\n", ls.URI, ls.FileCount)

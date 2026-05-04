@@ -518,6 +518,121 @@ db_path = ".llmwiki/wiki.db"
 	}
 }
 
+// resetUpdateExistingFlags clears the two sub-project 6b flags both at
+// test entry and on Cleanup so flag state doesn't bleed across the
+// cmd-package's shared ingestCmd singleton. cobra's pflag.Flag tracks
+// Changed as a sticky bit (Set bumps it), so we reach in via Lookup to
+// reset both the value AND the Changed bit.
+func resetUpdateExistingFlags(t *testing.T) {
+	t.Helper()
+	clear := func() {
+		for _, name := range []string{"update-existing", "debug-updates"} {
+			f := ingestCmd.Flags().Lookup(name)
+			if f == nil {
+				continue
+			}
+			_ = f.Value.Set("false")
+			f.Changed = false
+		}
+	}
+	clear()
+	t.Cleanup(clear)
+}
+
+// TestIngest_UpdateExistingFlagDefaultsOff: with no --update-existing
+// flag and no [ingest] update_existing config key, the IngestOptions
+// reaching wiki.IngestSource must have UpdateExisting == false (Q11).
+func TestIngest_UpdateExistingFlagDefaultsOff(t *testing.T) {
+	resetUpdateExistingFlags(t)
+	opts := buildWikiIngestOptions(ingestCmd, nil)
+	if opts.UpdateExisting {
+		t.Errorf("UpdateExisting = true with no flag/config; want false")
+	}
+}
+
+// TestIngest_UpdateExistingFlagOverridesConfigOff: when the config has
+// update_existing = false but CLI passes --update-existing, the CLI flag
+// wins (layered precedence).
+func TestIngest_UpdateExistingFlagOverridesConfigOff(t *testing.T) {
+	resetUpdateExistingFlags(t)
+	if err := ingestCmd.ParseFlags([]string{"--update-existing"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	f := false
+	c := &Config{Ingest: IngestConfig{UpdateExisting: &f}}
+	opts := buildWikiIngestOptions(ingestCmd, c)
+	if !opts.UpdateExisting {
+		t.Errorf("UpdateExisting = false; CLI --update-existing should win over config off")
+	}
+}
+
+// TestIngest_UpdateExistingFlagOverridesConfigOn: when the config has
+// update_existing = true and CLI passes --update-existing=false, the CLI
+// flag wins. Tests the "explicit opt-out via CLI" path.
+func TestIngest_UpdateExistingFlagOverridesConfigOn(t *testing.T) {
+	resetUpdateExistingFlags(t)
+	if err := ingestCmd.ParseFlags([]string{"--update-existing=false"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	tr := true
+	c := &Config{Ingest: IngestConfig{UpdateExisting: &tr}}
+	opts := buildWikiIngestOptions(ingestCmd, c)
+	if opts.UpdateExisting {
+		t.Errorf("UpdateExisting = true; CLI --update-existing=false should win over config on")
+	}
+}
+
+// TestIngest_UpdateExistingFlagFromConfig: no CLI flag; config has
+// update_existing = true; the config value reaches IngestOptions.
+func TestIngest_UpdateExistingFlagFromConfig(t *testing.T) {
+	resetUpdateExistingFlags(t)
+	tr := true
+	c := &Config{Ingest: IngestConfig{UpdateExisting: &tr}}
+	opts := buildWikiIngestOptions(ingestCmd, c)
+	if !opts.UpdateExisting {
+		t.Errorf("UpdateExisting = false; config update_existing=true should propagate")
+	}
+}
+
+// TestIngest_DebugUpdatesFlag: --debug-updates must propagate into
+// IngestOptions.DebugUpdates.
+func TestIngest_DebugUpdatesFlag(t *testing.T) {
+	resetUpdateExistingFlags(t)
+	if err := ingestCmd.ParseFlags([]string{"--debug-updates"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	opts := buildWikiIngestOptions(ingestCmd, nil)
+	if !opts.DebugUpdates {
+		t.Errorf("DebugUpdates = false; --debug-updates should set it true")
+	}
+}
+
+// TestIngest_TunablesPropagateFromConfig: the three integer tunables in
+// [ingest] (max_candidates_per_source, max_candidates_total, quote_floor)
+// reach IngestOptions unchanged when the config sets non-default values.
+func TestIngest_TunablesPropagateFromConfig(t *testing.T) {
+	resetUpdateExistingFlags(t)
+	c := &Config{
+		Ingest: IngestConfig{
+			UpdateExistingMaxCandidatesPerSource: 7,
+			UpdateExistingMaxCandidatesTotal:     11,
+			UpdateExistingQuoteFloor:             5,
+		},
+	}
+	opts := buildWikiIngestOptions(ingestCmd, c)
+	if opts.UpdateExistingMaxCandidatesPerSource != 7 {
+		t.Errorf("MaxCandidatesPerSource = %d, want 7",
+			opts.UpdateExistingMaxCandidatesPerSource)
+	}
+	if opts.UpdateExistingMaxCandidatesTotal != 11 {
+		t.Errorf("MaxCandidatesTotal = %d, want 11",
+			opts.UpdateExistingMaxCandidatesTotal)
+	}
+	if opts.UpdateExistingQuoteFloor != 5 {
+		t.Errorf("QuoteFloor = %d, want 5", opts.UpdateExistingQuoteFloor)
+	}
+}
+
 // sanity assertion: paths in `gone` are returned in arbitrary order; tests
 // shouldn't depend on map iteration order.
 func TestPartitionGoneSortable(t *testing.T) {

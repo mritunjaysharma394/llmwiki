@@ -32,6 +32,10 @@ func init() {
 	ingestCmd.Flags().Bool("feed", false, "force feed-parser dispatch")
 	ingestCmd.Flags().Bool("sitemap", false, "force sitemap dispatch")
 	ingestCmd.Flags().Int("max-pages", 0, "cap on feed entries / sitemap pages (0 uses [ingest] defaults)")
+	ingestCmd.Flags().Bool("update-existing", false,
+		"after writing new pages, propose updates to existing pages whose claims this source touches; off by default. Pages whose proposed body fails byte-exact substring-match validation against the (new + existing) source union stay at their previous version.")
+	ingestCmd.Flags().Bool("debug-updates", false,
+		"print per-candidate verdicts from --update-existing to stderr (LLM proposed body, validator kept N quotes, content_hash drift); useful when an update_failed line appears in the summary.")
 }
 
 // DefaultFeedOptionsFromConfig resolves feed crawl tunables from the [ingest]
@@ -194,7 +198,7 @@ func runIngest(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 
 	wcfg := toWikiIngestConfig(cfg)
-	opts := buildWikiIngestOptions(cmd)
+	opts := buildWikiIngestOptions(cmd, cfg)
 	opts.Logger = os.Stdout
 
 	_, err := wiki.IngestSource(ctx, wcfg, database, llmClient, source, opts)
@@ -241,8 +245,10 @@ func toWikiIngestConfig(c *Config) wiki.IngestSourceConfig {
 
 // buildWikiIngestOptions reads cobra flags into the runner's IngestOptions.
 // Defaults are zero-values; the runner falls back to walker / fetcher
-// defaults internally when fields are zero.
-func buildWikiIngestOptions(cmd *cobra.Command) wiki.IngestOptions {
+// defaults internally when fields are zero. The Config argument is used
+// for sub-project 6b's [ingest] update_existing block — flag wins when
+// explicitly set, otherwise the config falls through.
+func buildWikiIngestOptions(cmd *cobra.Command, c *Config) wiki.IngestOptions {
 	opts := wiki.IngestOptions{
 		Force:     forceFlag(cmd),
 		NoRechunk: false,
@@ -271,7 +277,30 @@ func buildWikiIngestOptions(cmd *cobra.Command) wiki.IngestOptions {
 	if v, _ := cmd.Flags().GetBool("no-gitignore"); v {
 		opts.NoGitignore = true
 	}
+	opts.UpdateExisting = resolveUpdateExisting(cmd, c)
+	if v, _ := cmd.Flags().GetBool("debug-updates"); v {
+		opts.DebugUpdates = true
+	}
+	if c != nil {
+		opts.UpdateExistingMaxCandidatesPerSource = c.Ingest.UpdateExistingMaxCandidatesPerSource
+		opts.UpdateExistingMaxCandidatesTotal = c.Ingest.UpdateExistingMaxCandidatesTotal
+		opts.UpdateExistingQuoteFloor = c.Ingest.UpdateExistingQuoteFloor
+	}
 	return opts
+}
+
+// resolveUpdateExisting layers package default → [ingest] config → CLI
+// flag, CLI wins when explicitly set. Mirrors the RespectGitignore *bool
+// "absent vs explicit" disambiguation pattern.
+func resolveUpdateExisting(cmd *cobra.Command, c *Config) bool {
+	if cmd.Flags().Changed("update-existing") {
+		v, _ := cmd.Flags().GetBool("update-existing")
+		return v
+	}
+	if c != nil {
+		return c.Ingest.UpdateExistingOrDefault()
+	}
+	return false
 }
 
 // distinctSourceFiles returns the distinct, first-occurrence-ordered list of
