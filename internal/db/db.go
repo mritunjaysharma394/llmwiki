@@ -240,11 +240,59 @@ func (d *DB) migrate() error {
 		}
 	}
 
+	if version < 6 {
+		// Sub-project 8 (v0.8) — additive only.
+		//
+		// ingest_queue is the persistent crash-resumable queue that
+		// drives `llmwiki watch`'s producer/consumer loop. Per plan §5
+		// it carries (id, source_uri, attempts, last_error, status,
+		// enqueued_at, updated_at, next_attempt_at). Status values are
+		// pending | running | retrying | done | failed; the queue
+		// package owns the state machine.
+		//
+		// idx_ingest_queue_status backs the NextPending() lookup
+		// (oldest eligible row by (status, id) ordering); on the
+		// expected workload — a few hundred queue rows — sqlite will
+		// happily seq-scan, but the index is cheap and matches the
+		// access pattern.
+		//
+		// No ALTER TABLE on existing tables. pages, evidence, sources,
+		// source_files, chunks, page_update_log, saved_answers are
+		// byte-identical pre/post v6.
+		v6 := []string{
+			`CREATE TABLE IF NOT EXISTS ingest_queue (
+				id INTEGER PRIMARY KEY,
+				source_uri TEXT NOT NULL,
+				attempts INTEGER NOT NULL DEFAULT 0,
+				last_error TEXT NOT NULL DEFAULT '',
+				status TEXT NOT NULL DEFAULT 'pending',
+				enqueued_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				next_attempt_at DATETIME
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_ingest_queue_status ON ingest_queue(status)`,
+			`PRAGMA user_version = 6`,
+		}
+		for _, stmt := range v6 {
+			if _, err := d.sql.Exec(stmt); err != nil {
+				return fmt.Errorf("v6 migration %q: %w", stmt[:min(50, len(stmt))], err)
+			}
+		}
+	}
+
 	if _, err := d.sql.Exec(`PRAGMA foreign_keys = ON`); err != nil {
 		return fmt.Errorf("enable foreign_keys: %w", err)
 	}
 	return nil
 }
+
+// SQL returns the underlying *sql.DB handle. internal/queue uses this
+// to share one connection pool with the rest of llmwiki, which keeps
+// the v6 ingest_queue table in the same wiki.db file as everything
+// else and avoids cross-process write locks. Production callers
+// (cmd/watch in Phase E) plumb d.SQL() into queue.New(); internal/db
+// is the single owner of the file.
+func (d *DB) SQL() *sql.DB { return d.sql }
 
 func min(a, b int) int {
 	if a < b {

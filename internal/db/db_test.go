@@ -29,8 +29,8 @@ func TestOpenCreatesEvidenceAndSavedAnswers(t *testing.T) {
 	if err := d.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("user_version: %v", err)
 	}
-	if version != 5 {
-		t.Errorf("user_version = %d, want 5", version)
+	if version != 6 {
+		t.Errorf("user_version = %d, want 6", version)
 	}
 }
 
@@ -51,8 +51,8 @@ func TestOpenIsIdempotent(t *testing.T) {
 	if err := d2.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("user_version: %v", err)
 	}
-	if version != 5 {
-		t.Errorf("user_version after re-open = %d, want 5", version)
+	if version != 6 {
+		t.Errorf("user_version after re-open = %d, want 6", version)
 	}
 }
 
@@ -76,8 +76,8 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 	defer d2.Close()
 	var version int
 	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&version)
-	if version != 5 {
-		t.Errorf("user_version after upgrade = %d, want 5", version)
+	if version != 6 {
+		t.Errorf("user_version after upgrade = %d, want 6", version)
 	}
 }
 
@@ -112,8 +112,8 @@ func TestOpenAtFreshV2(t *testing.T) {
 	}
 	var version int
 	d.sql.QueryRow(`PRAGMA user_version`).Scan(&version)
-	if version != 5 {
-		t.Errorf("user_version = %d, want 5", version)
+	if version != 6 {
+		t.Errorf("user_version = %d, want 6", version)
 	}
 }
 
@@ -137,8 +137,8 @@ func TestOpenUpgradesV1ToV2(t *testing.T) {
 	defer d2.Close()
 	var v int
 	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v)
-	if v != 5 {
-		t.Errorf("user_version after upgrade = %d, want 5", v)
+	if v != 6 {
+		t.Errorf("user_version after upgrade = %d, want 6", v)
 	}
 	var name string
 	if err := d2.sql.QueryRow(`SELECT name FROM sqlite_master WHERE name = 'source_files'`).Scan(&name); err != nil {
@@ -166,8 +166,8 @@ func TestOpenUpgradesLegacyV0ToV2(t *testing.T) {
 	defer d2.Close()
 	var v int
 	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v)
-	if v != 5 {
-		t.Errorf("user_version after v0->v2 upgrade = %d, want 5", v)
+	if v != 6 {
+		t.Errorf("user_version after v0->v2 upgrade = %d, want 6", v)
 	}
 }
 
@@ -179,8 +179,8 @@ func TestOpenAtFreshV3(t *testing.T) {
 	}
 	var version int
 	d.sql.QueryRow(`PRAGMA user_version`).Scan(&version)
-	if version != 5 {
-		t.Errorf("user_version = %d, want 5", version)
+	if version != 6 {
+		t.Errorf("user_version = %d, want 6", version)
 	}
 }
 
@@ -202,8 +202,8 @@ func TestOpenUpgradesV2ToV3(t *testing.T) {
 	defer d2.Close()
 	var v int
 	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v)
-	if v != 5 {
-		t.Errorf("user_version after upgrade = %d, want 5", v)
+	if v != 6 {
+		t.Errorf("user_version after upgrade = %d, want 6", v)
 	}
 }
 
@@ -458,8 +458,8 @@ func TestMigrate_FromFresh_LandsAtV4(t *testing.T) {
 	if err := d.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("user_version: %v", err)
 	}
-	if version != 5 {
-		t.Errorf("user_version = %d, want 5", version)
+	if version != 6 {
+		t.Errorf("user_version = %d, want 6", version)
 	}
 	var name string
 	if err := d.sql.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='page_update_log'`).Scan(&name); err != nil {
@@ -490,8 +490,8 @@ func TestMigrate_FromV3_AddsPageUpdateLog(t *testing.T) {
 	if err := d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
 		t.Fatalf("user_version: %v", err)
 	}
-	if v != 5 {
-		t.Errorf("user_version after upgrade = %d, want 5", v)
+	if v != 6 {
+		t.Errorf("user_version after upgrade = %d, want 6", v)
 	}
 	expectedCols := map[string]bool{
 		"id": false, "page_id": false, "source_id": false,
@@ -541,8 +541,8 @@ func TestMigrate_Idempotent_RerunningOnV4_IsNoop(t *testing.T) {
 	if err := d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
 		t.Fatalf("user_version: %v", err)
 	}
-	if v != 5 {
-		t.Errorf("user_version = %d, want 5", v)
+	if v != 6 {
+		t.Errorf("user_version = %d, want 6", v)
 	}
 	var name string
 	if err := d2.sql.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='page_update_log'`).Scan(&name); err != nil {
@@ -617,8 +617,8 @@ func TestMigrate_FromFresh_LandsAtV5(t *testing.T) {
 	if err := d.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("user_version: %v", err)
 	}
-	if version != 5 {
-		t.Errorf("user_version = %d, want 5", version)
+	if version != 6 {
+		t.Errorf("user_version = %d, want 6", version)
 	}
 	rows, err := d.sql.Query(`PRAGMA table_info(pages)`)
 	if err != nil {
@@ -711,8 +711,8 @@ func TestMigrate_FromV4_AddsSchemaHash(t *testing.T) {
 	defer d2.Close()
 	var v int
 	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v)
-	if v != 5 {
-		t.Errorf("user_version after upgrade = %d, want 5", v)
+	if v != 6 {
+		t.Errorf("user_version after upgrade = %d, want 6", v)
 	}
 	var got string
 	if err := d2.sql.QueryRow(`SELECT schema_hash FROM pages WHERE title = ?`, "Pre-V5 Page").Scan(&got); err != nil {
@@ -753,8 +753,8 @@ func TestMigrate_Idempotent_RerunningOnV5_IsNoop(t *testing.T) {
 	defer d2.Close()
 	var v int
 	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v)
-	if v != 5 {
-		t.Errorf("user_version = %d, want 5", v)
+	if v != 6 {
+		t.Errorf("user_version = %d, want 6", v)
 	}
 	rows, err := d2.sql.Query(`PRAGMA table_info(pages)`)
 	if err != nil {
@@ -907,6 +907,131 @@ func TestMigrate_DoesNotAlterEvidenceSourcesSourceFilesChunksPageUpdateLog(t *te
 		if after != before[tbl] {
 			t.Errorf("table %q schema changed across v4->v5 upgrade\nbefore: %s\nafter:  %s", tbl, before[tbl], after)
 		}
+	}
+}
+
+// --- Sub-project 8 (v0.8) — Phase A / Task 2 — ingest_queue table ---
+
+// TestMigrate_FromFresh_LandsAtV6 — open a fresh DB; PRAGMA user_version
+// is 6 and the ingest_queue table exists with the documented columns.
+func TestMigrate_FromFresh_LandsAtV6(t *testing.T) {
+	d := mustOpen(t)
+	var version int
+	if err := d.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("user_version: %v", err)
+	}
+	if version != 6 {
+		t.Errorf("user_version = %d, want 6", version)
+	}
+	expectedCols := map[string]bool{
+		"id": false, "source_uri": false, "attempts": false,
+		"last_error": false, "status": false,
+		"enqueued_at": false, "updated_at": false,
+		"next_attempt_at": false,
+	}
+	rows, err := d.sql.Query(`PRAGMA table_info(ingest_queue)`)
+	if err != nil {
+		t.Fatalf("table_info: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := expectedCols[name]; ok {
+			expectedCols[name] = true
+		}
+	}
+	for col, found := range expectedCols {
+		if !found {
+			t.Errorf("ingest_queue missing column %q", col)
+		}
+	}
+}
+
+// TestMigrate_FromV5_AddsIngestQueue — force user_version=5 with no
+// ingest_queue table; reopen via db.Open; assert user_version=6 and
+// the table exists.
+func TestMigrate_FromV5_AddsIngestQueue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wiki.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	d.sql.Exec(`DROP TABLE IF EXISTS ingest_queue`)
+	if _, err := d.sql.Exec(`PRAGMA user_version = 5`); err != nil {
+		t.Fatalf("force v5: %v", err)
+	}
+	d.Close()
+
+	d2, err := Open(path)
+	if err != nil {
+		t.Fatalf("re-Open: %v", err)
+	}
+	defer d2.Close()
+	var v int
+	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v)
+	if v != 6 {
+		t.Errorf("user_version after upgrade = %d, want 6", v)
+	}
+	var name string
+	if err := d2.sql.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='ingest_queue'`).Scan(&name); err != nil {
+		t.Errorf("ingest_queue not created on upgrade: %v", err)
+	}
+}
+
+// TestMigrate_Idempotent_RerunningOnV6_IsNoop — open a v6 DB twice;
+// no errors, ingest_queue present once, idx_ingest_queue_status
+// present once.
+func TestMigrate_Idempotent_RerunningOnV6_IsNoop(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wiki.db")
+	d1, err := Open(path)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	d1.Close()
+	d2, err := Open(path)
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	defer d2.Close()
+	var v int
+	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v)
+	if v != 6 {
+		t.Errorf("user_version = %d, want 6", v)
+	}
+	var n int
+	if err := d2.sql.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='ingest_queue'`).Scan(&n); err != nil {
+		t.Fatalf("count ingest_queue: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("ingest_queue table count = %d, want 1", n)
+	}
+	if err := d2.sql.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_ingest_queue_status'`).Scan(&n); err != nil {
+		t.Fatalf("count idx_ingest_queue_status: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("idx_ingest_queue_status count = %d, want 1", n)
+	}
+}
+
+// TestSQL_ReturnsUnderlyingHandle — internal/queue uses (*DB).SQL() to
+// share one connection pool with the rest of llmwiki.
+func TestSQL_ReturnsUnderlyingHandle(t *testing.T) {
+	d := mustOpen(t)
+	if d.SQL() == nil {
+		t.Fatal("SQL() returned nil")
+	}
+	// Round-trip a trivial query through the exposed handle.
+	var n int
+	if err := d.SQL().QueryRow(`SELECT COUNT(*) FROM ingest_queue`).Scan(&n); err != nil {
+		t.Errorf("query via SQL(): %v", err)
 	}
 }
 
