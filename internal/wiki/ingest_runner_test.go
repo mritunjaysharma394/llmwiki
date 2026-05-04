@@ -806,3 +806,308 @@ func TestIngestSource_UpdateExistingSecondRetroLinkPass_SeesUpdatedBodies(t *tes
 		t.Errorf("Stale Page body missing [[Mutex]] after second retro-link pass:\n%s", staleBytes)
 	}
 }
+
+// installContradictionForcedCandidatesSeams swaps detectIngestContradictionsFn
+// to return the supplied synthetic contradictions (bypassing the LLM) and
+// updateExistingFn to record the UpdateExistingOptions the runner
+// constructs (so tests can inspect ForcedCandidateIDs without engaging
+// the real update pass). Restores the originals on cleanup. The
+// recorder also captures call count so the OFF-flag test can assert
+// the seam never fired.
+type forcedCandSeamHarness struct {
+	mu       sync.Mutex
+	upCalls  []UpdateExistingOptions
+	contras  []Contradiction
+}
+
+func installContradictionForcedCandidatesSeams(t *testing.T, contras []Contradiction) *forcedCandSeamHarness {
+	t.Helper()
+	h := &forcedCandSeamHarness{contras: contras}
+	origUpdate := updateExistingFn
+	origContra := detectIngestContradictionsFn
+	updateExistingFn = func(
+		ctx context.Context,
+		cfg IngestSourceConfig,
+		database *db.DB,
+		client llm.Client,
+		sourceID int64,
+		newSourceFiles []ingest.SourceFile,
+		newPageTitles []string,
+		opts UpdateExistingOptions,
+	) (UpdateResult, error) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		// Copy the slice to insulate the recorder from later mutation.
+		optsCopy := opts
+		if opts.ForcedCandidateIDs != nil {
+			optsCopy.ForcedCandidateIDs = append([]int64{}, opts.ForcedCandidateIDs...)
+		}
+		h.upCalls = append(h.upCalls, optsCopy)
+		return UpdateResult{}, nil
+	}
+	detectIngestContradictionsFn = func(
+		ctx context.Context,
+		client llm.Client,
+		newPages []Page,
+		existingPages []db.PageRecord,
+		candidateLimit int,
+		database *db.DB,
+	) ([]Contradiction, error) {
+		return h.contras, nil
+	}
+	t.Cleanup(func() {
+		updateExistingFn = origUpdate
+		detectIngestContradictionsFn = origContra
+	})
+	return h
+}
+
+func (h *forcedCandSeamHarness) calls() []UpdateExistingOptions {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]UpdateExistingOptions, len(h.upCalls))
+	copy(out, h.upCalls)
+	return out
+}
+
+// seedExistingPageForContradiction pre-seeds an existing page (with
+// evidence) on disk + DB so DetectIngestContradictions has a real
+// candidate row in the wiki. Returns the page's DB ID.
+func seedExistingPageForContradiction(t *testing.T, cfg IngestSourceConfig, database *db.DB, title, body, quote string) int64 {
+	t.Helper()
+	srcID, err := database.UpsertSource("test://contra-seed", "h-contra-seed")
+	if err != nil {
+		t.Fatalf("UpsertSource: %v", err)
+	}
+	sfID, err := database.UpsertSourceFile(db.SourceFile{
+		SourceID: srcID, RelativePath: "seed.md", ContentHash: "h", ByteSize: 1, LineCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("UpsertSourceFile: %v", err)
+	}
+	page := Page{
+		Title:       title,
+		Body:        body,
+		ContentHash: HashContent(body),
+		SourceIDs:   []int64{srcID},
+		Evidence: []Evidence{
+			{Quote: quote, LineStart: 1, LineEnd: 1, SourceFilePath: "seed.md"},
+		},
+	}
+	if err := WritePage(page, cfg.WikiDir); err != nil {
+		t.Fatalf("WritePage seed: %v", err)
+	}
+	if err := database.UpsertPage(db.PageRecord{
+		Title:       title,
+		Path:        filepath.Join(cfg.WikiDir, title+".md"),
+		Body:        body,
+		ContentHash: page.ContentHash,
+		SourceIDs:   []int64{srcID},
+	}); err != nil {
+		t.Fatalf("UpsertPage seed: %v", err)
+	}
+	stored, err := database.GetPage(title)
+	if err != nil || stored == nil {
+		t.Fatalf("re-fetch seed: err=%v rec=%v", err, stored)
+	}
+	if err := database.InsertEvidence(stored.ID, srcID, []db.Evidence{
+		{Quote: quote, LineStart: 1, LineEnd: 1, SourceFileID: &sfID},
+	}); err != nil {
+		t.Fatalf("InsertEvidence seed: %v", err)
+	}
+	return stored.ID
+}
+
+// TestIngestSource_ContradictionForcesCandidate_WhenUpdateExistingOn pre-
+// seeds an existing page that does NOT FTS-match the new source's
+// content (zero keyword overlap); the contradiction seam returns one
+// Contradiction{ExistingTitle: P.Title}; IngestOptions.UpdateExisting
+// = true. Asserts P's page ID lands in
+// UpdateExistingOptions.ForcedCandidateIDs reaching the update seam.
+// Without the bridge P would never be a candidate (FTS misses it);
+// with the bridge, the contradiction promotes it.
+func TestIngestSource_ContradictionForcesCandidate_WhenUpdateExistingOn(t *testing.T) {
+	cfg, database, srcPath := setupBasicIngestEnv(t)
+	// Existing page whose body has zero overlap with the new source
+	// (the source is "Mutex coordinates access to shared state.\n").
+	forcedID := seedExistingPageForContradiction(t, cfg, database,
+		"Lonely Existing Page",
+		"Quokka behavior under autumn rain.\n",
+		"quokka behavior under autumn rain")
+	h := installContradictionForcedCandidatesSeams(t, []Contradiction{
+		{ExistingTitle: "Lonely Existing Page", ExistingQuote: "quokka behavior under autumn rain"},
+	})
+	client := &fakeIngestPagesClient{
+		titleOverride: "Mutex",
+		body:          "Body about Mutex.",
+		quote:         "Mutex coordinates access to shared state.",
+	}
+	_, err := IngestSource(context.Background(), cfg, database, client, srcPath, IngestOptions{
+		UpdateExisting: true,
+	})
+	if err != nil {
+		t.Fatalf("IngestSource: %v", err)
+	}
+	calls := h.calls()
+	if len(calls) != 1 {
+		t.Fatalf("update seam fired %d time(s); want 1", len(calls))
+	}
+	got := calls[0].ForcedCandidateIDs
+	if len(got) != 1 || got[0] != forcedID {
+		t.Errorf("ForcedCandidateIDs = %v, want [%d]", got, forcedID)
+	}
+}
+
+// TestIngestSource_ContradictionDoesNOTForceCandidate_WhenUpdateExistingOff
+// — same setup, but UpdateExisting=false. Asserts the update seam is
+// never called (gate from Phase C). The contradiction warn-only
+// behaviour from v0.5 is unchanged: the contradiction surface still
+// fires, but no forced candidate is computed because there's nowhere
+// to feed it.
+func TestIngestSource_ContradictionDoesNOTForceCandidate_WhenUpdateExistingOff(t *testing.T) {
+	cfg, database, srcPath := setupBasicIngestEnv(t)
+	seedExistingPageForContradiction(t, cfg, database,
+		"Lonely Existing Page",
+		"Quokka behavior under autumn rain.\n",
+		"quokka behavior under autumn rain")
+	h := installContradictionForcedCandidatesSeams(t, []Contradiction{
+		{ExistingTitle: "Lonely Existing Page", ExistingQuote: "quokka behavior under autumn rain"},
+	})
+	client := &fakeIngestPagesClient{
+		titleOverride: "Mutex",
+		body:          "Body about Mutex.",
+		quote:         "Mutex coordinates access to shared state.",
+	}
+	_, err := IngestSource(context.Background(), cfg, database, client, srcPath, IngestOptions{
+		UpdateExisting: false,
+	})
+	if err != nil {
+		t.Fatalf("IngestSource: %v", err)
+	}
+	if calls := h.calls(); len(calls) != 0 {
+		t.Errorf("update seam fired %d time(s) with UpdateExisting=false; want 0", len(calls))
+	}
+}
+
+// TestIngestSource_ContradictionForcedCandidate_BypassesGlobalCap pins
+// the spec rationale that forced > capped. We set MaxCandidatesTotal=1
+// so the FTS-walk's global cap has no headroom for the forced page;
+// the contradiction-forced candidate must still reach
+// UpdateExistingOptions.ForcedCandidateIDs verbatim. The cap-bypass
+// logic itself is exercised end-to-end inside selectUpdateCandidates
+// (see TestUpdateExistingPagesFromSource_CandidateSelection_ForcedIDsPreservedPastGlobalCap);
+// this test just verifies the bridge passes the forced ID through to
+// the update pass intact regardless of the configured cap.
+func TestIngestSource_ContradictionForcedCandidate_BypassesGlobalCap(t *testing.T) {
+	cfg, database, srcPath := setupBasicIngestEnv(t)
+	forcedID := seedExistingPageForContradiction(t, cfg, database,
+		"Lonely Existing Page",
+		"Quokka behavior under autumn rain.\n",
+		"quokka behavior under autumn rain")
+	h := installContradictionForcedCandidatesSeams(t, []Contradiction{
+		{ExistingTitle: "Lonely Existing Page", ExistingQuote: "quokka behavior under autumn rain"},
+	})
+	client := &fakeIngestPagesClient{
+		titleOverride: "Mutex",
+		body:          "Body about Mutex.",
+		quote:         "Mutex coordinates access to shared state.",
+	}
+	_, err := IngestSource(context.Background(), cfg, database, client, srcPath, IngestOptions{
+		UpdateExisting:                   true,
+		UpdateExistingMaxCandidatesTotal: 1, // tighten the cap
+	})
+	if err != nil {
+		t.Fatalf("IngestSource: %v", err)
+	}
+	calls := h.calls()
+	if len(calls) != 1 {
+		t.Fatalf("update seam fired %d time(s); want 1", len(calls))
+	}
+	got := calls[0].ForcedCandidateIDs
+	if len(got) != 1 || got[0] != forcedID {
+		t.Errorf("ForcedCandidateIDs = %v, want [%d] (forced > capped)", got, forcedID)
+	}
+	if calls[0].MaxCandidatesTotal != 1 {
+		t.Errorf("MaxCandidatesTotal propagated = %d, want 1", calls[0].MaxCandidatesTotal)
+	}
+}
+
+// TestIngestSource_ContradictionForcedCandidate_DedupesWithFTSHit pre-
+// seeds an existing page that BOTH FTS-matches AND is contradicted;
+// asserts ForcedCandidateIDs contains the page exactly once (no
+// double-walk). The dedup itself happens inside
+// forcedCandidatesFromContradictions: every distinct ExistingTitle
+// resolves to a unique page ID, but if the same title appears twice
+// in the contradiction list (e.g., two distinct quote-pairs against
+// the same existing page) the bridge should still emit one forced ID.
+func TestIngestSource_ContradictionForcedCandidate_DedupesWithFTSHit(t *testing.T) {
+	cfg, database, srcPath := setupBasicIngestEnv(t)
+	// This page's body shares the keyword "Mutex" with the new source —
+	// so it would also surface via FTS independently. We further force
+	// it via the contradiction bridge.
+	forcedID := seedExistingPageForContradiction(t, cfg, database,
+		"Mutex Behavior",
+		"Mutex always blocks until acquired.\n",
+		"Mutex always blocks until acquired.")
+	// Two contradictions naming the SAME existing title — the bridge
+	// must dedup.
+	h := installContradictionForcedCandidatesSeams(t, []Contradiction{
+		{ExistingTitle: "Mutex Behavior", ExistingQuote: "Mutex always blocks until acquired."},
+		{ExistingTitle: "Mutex Behavior", ExistingQuote: "Mutex always blocks until acquired."},
+	})
+	client := &fakeIngestPagesClient{
+		titleOverride: "Mutex",
+		body:          "Body about Mutex.",
+		quote:         "Mutex coordinates access to shared state.",
+	}
+	_, err := IngestSource(context.Background(), cfg, database, client, srcPath, IngestOptions{
+		UpdateExisting: true,
+	})
+	if err != nil {
+		t.Fatalf("IngestSource: %v", err)
+	}
+	calls := h.calls()
+	if len(calls) != 1 {
+		t.Fatalf("update seam fired %d time(s); want 1", len(calls))
+	}
+	got := calls[0].ForcedCandidateIDs
+	count := 0
+	for _, id := range got {
+		if id == forcedID {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("forcedID %d appeared %d times in ForcedCandidateIDs %v, want 1 (dedup failure)", forcedID, count, got)
+	}
+}
+
+// TestIngestSource_NoContradiction_NoForcedCandidates — when the
+// contradiction seam returns empty, ForcedCandidateIDs handed to the
+// update pass must be nil/empty. No false positives.
+func TestIngestSource_NoContradiction_NoForcedCandidates(t *testing.T) {
+	cfg, database, srcPath := setupBasicIngestEnv(t)
+	seedExistingPageForContradiction(t, cfg, database,
+		"Some Page",
+		"Some unrelated content body.\n",
+		"unrelated content")
+	h := installContradictionForcedCandidatesSeams(t, nil) // empty contradictions
+	client := &fakeIngestPagesClient{
+		titleOverride: "Mutex",
+		body:          "Body about Mutex.",
+		quote:         "Mutex coordinates access to shared state.",
+	}
+	_, err := IngestSource(context.Background(), cfg, database, client, srcPath, IngestOptions{
+		UpdateExisting: true,
+	})
+	if err != nil {
+		t.Fatalf("IngestSource: %v", err)
+	}
+	calls := h.calls()
+	if len(calls) != 1 {
+		t.Fatalf("update seam fired %d time(s); want 1", len(calls))
+	}
+	if got := calls[0].ForcedCandidateIDs; len(got) != 0 {
+		t.Errorf("ForcedCandidateIDs = %v, want empty (no contradictions → no forced)", got)
+	}
+}

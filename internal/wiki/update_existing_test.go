@@ -337,6 +337,55 @@ func TestUpdateExistingPagesFromSource_CandidateSelection_HonoursForcedCandidate
 	}
 }
 
+// TestUpdateExistingPagesFromSource_CandidateSelection_ForcedIDsPreservedPastGlobalCap
+// pins Phase F's spec rationale that forced > capped: a contradiction
+// is the strongest possible signal a new source touches an existing
+// page, so a forced candidate must survive even when the FTS-walk
+// union has already saturated MaxCandidatesTotal. We seed 5 widget-
+// matched pages, set MaxCandidatesTotal=3 (so the cap has no headroom
+// for the forced page), and force a sixth (FTS-unrelated) page in.
+// Asserts the forced page still reaches the candidate list AND the
+// union grows to 4 (3 capped FTS hits + 1 forced).
+func TestUpdateExistingPagesFromSource_CandidateSelection_ForcedIDsPreservedPastGlobalCap(t *testing.T) {
+	fx := setupUpdateFixture(t)
+	// Five FTS-matching pages — every one keys off "widget content".
+	for i := 0; i < 5; i++ {
+		fx.seedPage(t, fmt.Sprintf("Matched Page %02d", i),
+			fmt.Sprintf("Widget content number %02d details.\n", i),
+			"widget content")
+	}
+	// One FTS-unrelated page — only reachable via ForcedCandidateIDs.
+	forcedID := fx.seedPage(t, "Lonely Forced Page",
+		"Has nothing in common with the new source.\n",
+		"completely unrelated terms")
+
+	newSrc := ingest.NewSourceFile("widgets.md", []byte("Widget overview content.\n"))
+	cands, err := selectUpdateCandidates(fx.DB, []ingest.SourceFile{newSrc}, nil, UpdateExistingOptions{
+		MaxCandidatesPerSource: 20,
+		MaxCandidatesTotal:     3, // cap < FTS-hit count, no headroom for forced
+		ForcedCandidateIDs:     []int64{forcedID},
+	})
+	if err != nil {
+		t.Fatalf("selectUpdateCandidates: %v", err)
+	}
+	titles := updateCandidateTitles(cands)
+	hasForced := false
+	for _, t := range titles {
+		if t == "Lonely Forced Page" {
+			hasForced = true
+		}
+	}
+	if !hasForced {
+		t.Errorf("forced candidate Lonely Forced Page dropped by global cap=3; titles=%v", titles)
+	}
+	// Cap = 3, forced = 1: union should be exactly 4 (3 FTS-shortlisted +
+	// 1 forced). Anything else means either the cap leaked or the forced
+	// candidate didn't bypass it.
+	if len(cands) != 4 {
+		t.Errorf("len(cands) = %d, want 4 (3 capped FTS + 1 forced); titles=%v", len(cands), titles)
+	}
+}
+
 // TestUpdateExistingPagesFromSource_NoCandidates_ReturnsEmptyResult exercises
 // the no-candidates fast path: the entrypoint returns UpdateResult{} with
 // no LLM calls.

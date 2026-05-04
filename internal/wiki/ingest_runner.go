@@ -709,14 +709,40 @@ func distinctEvidenceSourceFiles(ev []Evidence) []string {
 	return out
 }
 
-// forcedCandidatesFromContradictions is the contradiction-on-ingest
-// → cross-page-update bridge. Sub-project 6b Phase F (Task 9) wires
-// the bridge fully and adds the dedicated test surface; in this
-// commit it returns nil so the call site is in place but the bridge
-// is dormant. Phase F will walk contras for ExistingTitle, look up
-// each via database.GetPage, and return the deduped page IDs.
-func forcedCandidatesFromContradictions(_ *db.DB, _ []Contradiction) []int64 {
-	return nil
+// forcedCandidatesFromContradictions walks the contradiction list
+// from DetectIngestContradictions and returns the deduped page IDs
+// of every existing page that surfaced as a contradiction. Used by
+// Phase C's pillar-3 wire-in: when --update-existing is on AND
+// contradictions were detected, those existing pages bypass the
+// FTS shortlist + global cap and become forced candidates for the
+// update pass.
+//
+// Rationale (spec line 60): "[contradiction-on-ingest] upgraded to
+// 'edit existing page' once 6b lands". A contradiction is the
+// strongest possible signal that a new source touches an existing
+// page; if the FTS shortlist somehow missed it (rare but possible
+// with terse claims that don't share keywords), the contradiction
+// surface is the safety net.
+//
+// Pages that don't resolve via database.GetPage (deleted between the
+// contradiction call and this lookup, or any other miss) are quietly
+// skipped — the bridge is best-effort and never blocks the update
+// pass on its own.
+func forcedCandidatesFromContradictions(database *db.DB, contras []Contradiction) []int64 {
+	if len(contras) == 0 {
+		return nil
+	}
+	seen := map[int64]bool{}
+	var out []int64
+	for _, c := range contras {
+		rec, err := database.GetPage(c.ExistingTitle)
+		if err != nil || rec == nil || seen[rec.ID] {
+			continue
+		}
+		seen[rec.ID] = true
+		out = append(out, rec.ID)
+	}
+	return out
 }
 
 func joinComma(s []string) string {
