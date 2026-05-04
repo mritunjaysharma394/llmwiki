@@ -417,6 +417,25 @@ func askHandler(d Deps) mcpsrv.ToolHandlerFunc {
 // calls go to stderr (and the structured error payload returned to the
 // client) — never to log.md. Spec §risks calls this out as the
 // denial-of-evidence vector mitigation.
+//
+// Return JSON shape on success (sub-project 6a / v1.2.0):
+//
+//	{
+//	  "title":              string,    // resolved page title
+//	  "path":               string,    // absolute on-disk path
+//	  "evidence_quotes":    int,       // surviving validated quotes
+//	  "sources":            []string,  // distinct source_file paths
+//	  "retro_linked_pages": int,       // sub-project 6a (Phase D): count of
+//	                                   //   existing pages whose body was
+//	                                   //   rewritten to include [[NewTitle]]
+//	                                   //   for this new title (body-only,
+//	                                   //   idempotent; evidence rows
+//	                                   //   untouched).
+//	}
+//
+// Structured errors: title_exists (existing_path), evidence_required,
+// evidence_invalid (dropped, hint), source_not_ingested (source_file),
+// source_not_readable (source_file, source_uri), write_failed.
 
 func writePageHandler(d Deps) mcpsrv.ToolHandlerFunc {
 	return func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
@@ -757,6 +776,28 @@ func writePageHandler(d Deps) mcpsrv.ToolHandlerFunc {
 // what makes this handler implementable. Logger is io.Discard so
 // progress output doesn't pollute the JSON-RPC stdout channel; errors
 // surface in the structured response.
+//
+// Return JSON shape on success (sub-project 6a / v1.2.0):
+//
+//	{
+//	  "source":                 string,
+//	  "pages_written":          int,
+//	  "evidence_quotes":        int,
+//	  "dropped_pages":          int,
+//	  "skipped":                bool,
+//	  "retro_linked_pages":     int,    // sub-project 6a Phase D
+//	  "contradictions_flagged": int,    // sub-project 6a Phase E
+//	}
+//
+// retro_linked_pages counts existing pages whose body was rewritten to
+// include [[NewTitle]] for any of the new-this-batch titles (body-only,
+// idempotent; evidence rows untouched). contradictions_flagged counts
+// (newPage, existingPage) tuples where the contradiction-detection LLM
+// call returned a direct factual contradiction backed by validated
+// quotes on both sides; details append to <wikiDir>/contradictions.md.
+// Both counters are informational — they never block the ingest write.
+//
+// Structured errors: bad_request, ingest_failed.
 
 func ingestHandler(d Deps) mcpsrv.ToolHandlerFunc {
 	return func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
