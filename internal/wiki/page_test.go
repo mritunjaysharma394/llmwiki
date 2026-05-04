@@ -145,3 +145,186 @@ func TestWritePageCreatesDir(t *testing.T) {
 		t.Errorf("file not created: %v", err)
 	}
 }
+
+func TestPage_TagsSourcesCreatedRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	original := Page{
+		Title:       "Round Trip",
+		Body:        "body\n",
+		ContentHash: "h",
+		UpdatedAt:   time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC),
+		Tags:        []string{"llmwiki", "ingest"},
+		Sources:     []string{"internal/db/db.go", "internal/db/queries.go"},
+		Created:     time.Date(2026, 5, 4, 0, 0, 0, 0, time.UTC),
+	}
+	if err := WritePage(original, dir); err != nil {
+		t.Fatalf("WritePage: %v", err)
+	}
+	read, err := ReadPage(filepath.Join(dir, "Round Trip.md"))
+	if err != nil {
+		t.Fatalf("ReadPage: %v", err)
+	}
+	if len(read.Tags) != 2 || read.Tags[0] != "llmwiki" || read.Tags[1] != "ingest" {
+		t.Errorf("tags: got %#v want [llmwiki ingest]", read.Tags)
+	}
+	if len(read.Sources) != 2 || read.Sources[0] != "internal/db/db.go" || read.Sources[1] != "internal/db/queries.go" {
+		t.Errorf("sources: got %#v", read.Sources)
+	}
+	if !read.Created.Equal(original.Created) {
+		t.Errorf("created: got %v want %v", read.Created, original.Created)
+	}
+}
+
+func TestPage_PreV1_1FilesParseUnchanged(t *testing.T) {
+	content := `---
+title: Old Page
+updated_at: 2026-04-01T10:00:00Z
+content_hash: deadbeef
+source_ids: [1, 2]
+links:
+  - to: Other
+    type: supports
+---
+
+Pre-v1.1 body.
+`
+	p, err := ParsePage(content)
+	if err != nil {
+		t.Fatalf("ParsePage: %v", err)
+	}
+	if p.Title != "Old Page" {
+		t.Errorf("title = %q", p.Title)
+	}
+	if !p.UpdatedAt.Equal(time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)) {
+		t.Errorf("updated_at = %v", p.UpdatedAt)
+	}
+	if p.ContentHash != "deadbeef" {
+		t.Errorf("content_hash = %q", p.ContentHash)
+	}
+	if len(p.SourceIDs) != 2 || p.SourceIDs[0] != 1 || p.SourceIDs[1] != 2 {
+		t.Errorf("source_ids = %v", p.SourceIDs)
+	}
+	if len(p.Links) != 1 || p.Links[0].To != "Other" || p.Links[0].Type != "supports" {
+		t.Errorf("links = %#v", p.Links)
+	}
+	// New fields must be zero-valued.
+	if len(p.Tags) != 0 {
+		t.Errorf("Tags should be zero, got %#v", p.Tags)
+	}
+	if len(p.Sources) != 0 {
+		t.Errorf("Sources should be zero, got %#v", p.Sources)
+	}
+	if !p.Created.IsZero() {
+		t.Errorf("Created should be zero, got %v", p.Created)
+	}
+
+	// Round-trip the parsed Page back through WritePage; the new keys must
+	// NOT spontaneously appear (since the fields are zero-valued).
+	dir := t.TempDir()
+	p.Body = "Pre-v1.1 body.\n"
+	if err := WritePage(p, dir); err != nil {
+		t.Fatalf("WritePage: %v", err)
+	}
+	written, err := os.ReadFile(filepath.Join(dir, "Old Page.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(written)
+	if strings.Contains(s, "tags:") {
+		t.Errorf("pre-v1.1 round-trip should not add tags (no real data):\n%s", s)
+	}
+	if strings.Contains(s, "sources:") {
+		t.Errorf("pre-v1.1 round-trip should not add sources (no real data):\n%s", s)
+	}
+	if strings.Contains(s, "\ncreated:") {
+		t.Errorf("pre-v1.1 round-trip should not add created (no real data):\n%s", s)
+	}
+	// `updated:` IS populated from real data (UpdatedAt) so it MAY appear on
+	// round-trip — that's the plan's explicit contract. Just confirm we
+	// don't crash and the round-trip preserves real data.
+}
+
+func TestPage_TagsArrayFormatIsDataviewCompatible(t *testing.T) {
+	dir := t.TempDir()
+	p := Page{
+		Title:       "Fmt",
+		Body:        "b",
+		ContentHash: "h",
+		UpdatedAt:   time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC),
+		Tags:        []string{"llmwiki", "ingest"},
+	}
+	if err := WritePage(p, dir); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "Fmt.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "tags: [llmwiki, ingest]\n") {
+		t.Errorf("expected flat bracketed tags array; file:\n%s", string(data))
+	}
+	if strings.Contains(string(data), "tags:\n  -") {
+		t.Errorf("tags should not be emitted in block-list form; file:\n%s", string(data))
+	}
+}
+
+func TestPage_SourcesDerivedFromEvidence(t *testing.T) {
+	dir := t.TempDir()
+	// Caller leaves Sources nil; WritePage should derive the distinct set
+	// from Evidence.SourceFilePath (de-duped, first-occurrence order).
+	p := Page{
+		Title:       "Derived",
+		Body:        "b",
+		ContentHash: "h",
+		UpdatedAt:   time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC),
+		Evidence: []Evidence{
+			{Quote: "q1", LineStart: 1, LineEnd: 1, SourceFilePath: "internal/db/db.go"},
+			{Quote: "q2", LineStart: 2, LineEnd: 2, SourceFilePath: "internal/db/queries.go"},
+			{Quote: "q3", LineStart: 3, LineEnd: 3, SourceFilePath: "internal/db/db.go"}, // dup
+		},
+	}
+	if err := WritePage(p, dir); err != nil {
+		t.Fatal(err)
+	}
+	read, err := ReadPage(filepath.Join(dir, "Derived.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(read.Sources) != 2 {
+		t.Fatalf("expected 2 distinct sources, got %#v", read.Sources)
+	}
+	if read.Sources[0] != "internal/db/db.go" || read.Sources[1] != "internal/db/queries.go" {
+		t.Errorf("unexpected sources order/value: %#v", read.Sources)
+	}
+}
+
+func TestPage_CreatedIsDateOnly(t *testing.T) {
+	dir := t.TempDir()
+	p := Page{
+		Title:       "Date",
+		Body:        "b",
+		ContentHash: "h",
+		UpdatedAt:   time.Date(2026, 5, 4, 10, 30, 0, 0, time.UTC),
+		Created:     time.Date(2026, 5, 4, 0, 0, 0, 0, time.UTC),
+	}
+	if err := WritePage(p, dir); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "Date.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	if !strings.Contains(s, "created: 2026-05-04\n") {
+		t.Errorf("expected `created: 2026-05-04`; file:\n%s", s)
+	}
+	if strings.Contains(s, "created: 2026-05-04T") {
+		t.Errorf("created should be date-only, not RFC3339; file:\n%s", s)
+	}
+	if !strings.Contains(s, "updated: 2026-05-04\n") {
+		t.Errorf("expected `updated: 2026-05-04` twin; file:\n%s", s)
+	}
+	if !strings.Contains(s, "updated_at: 2026-05-04T10:30:00Z\n") {
+		t.Errorf("updated_at RFC3339 should still be present; file:\n%s", s)
+	}
+}

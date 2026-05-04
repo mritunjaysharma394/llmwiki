@@ -30,6 +30,26 @@ type Page struct {
 	ContentHash string
 	UpdatedAt   time.Time
 	Evidence    []Evidence
+	// sub-project 5: Obsidian / Dataview frontmatter.
+	//
+	// Tags is emitted on every llmwiki-written page as a flat bracketed
+	// string array (Dataview-friendly). Callers populate it (typically with
+	// the fixed value {"llmwiki", "ingest"}); ParsePage accepts any string
+	// array. When empty/nil, WritePage skips the key entirely so pre-v1.1
+	// pages round-trip without spontaneous additions.
+	//
+	// Sources is the distinct list of source_file relative paths backing
+	// this page's evidence. When non-empty, WritePage emits it verbatim;
+	// when empty/nil, WritePage derives the distinct set from p.Evidence
+	// (so callers can leave Sources unset and still get a Dataview-friendly
+	// `sources:` array on disk). On parse, Sources holds whatever the file
+	// emitted (may be nil for pre-v1.1 pages).
+	//
+	// Created is the date-only first-ingest stamp. When zero, WritePage
+	// skips emitting `created:` so pre-v1.1 round-trips remain stable.
+	Tags    []string
+	Sources []string
+	Created time.Time
 }
 
 func HashContent(content string) string {
@@ -64,6 +84,37 @@ func WritePage(p Page, wikiDir string) error {
 		sb.WriteString(fmt.Sprintf("source_ids: [%s]\n", strings.Join(ids, ", ")))
 	} else {
 		sb.WriteString("source_ids: []\n")
+	}
+	if len(p.Tags) > 0 {
+		escaped := make([]string, len(p.Tags))
+		for i, t := range p.Tags {
+			escaped[i] = yamlEscapeScalar(t)
+		}
+		sb.WriteString(fmt.Sprintf("tags: [%s]\n", strings.Join(escaped, ", ")))
+	}
+	// sources: honor caller-supplied Sources; otherwise derive the distinct
+	// set of source_file relative paths from Evidence. Skip the key when
+	// neither produces anything (preserves pre-v1.1 round-trip stability).
+	srcs := p.Sources
+	if len(srcs) == 0 {
+		srcs = distinctEvidenceSources(p.Evidence)
+	}
+	if len(srcs) > 0 {
+		escaped := make([]string, len(srcs))
+		for i, s := range srcs {
+			escaped[i] = yamlEscapeScalar(s)
+		}
+		sb.WriteString(fmt.Sprintf("sources: [%s]\n", strings.Join(escaped, ", ")))
+	}
+	if !p.Created.IsZero() {
+		sb.WriteString(fmt.Sprintf("created: %s\n", p.Created.UTC().Format("2006-01-02")))
+	}
+	// Date-only `updated:` twin alongside the RFC3339 `updated_at:` above —
+	// Dataview-friendly. Always emitted (UpdatedAt is always populated from
+	// real data, so this is "added populated from real data" per the
+	// pre-v1.1 round-trip contract rather than a spontaneous empty key).
+	if !p.UpdatedAt.IsZero() {
+		sb.WriteString(fmt.Sprintf("updated: %s\n", p.UpdatedAt.UTC().Format("2006-01-02")))
 	}
 	if len(p.Links) > 0 {
 		sb.WriteString("links:\n")
@@ -135,6 +186,12 @@ func ParsePage(content string) (Page, error) {
 			p.ContentHash = strings.TrimSpace(line[14:])
 		case strings.HasPrefix(line, "source_ids: "):
 			p.SourceIDs = parseIntArray(strings.TrimSpace(line[12:]))
+		case strings.HasPrefix(line, "tags: "):
+			p.Tags = parseStringArray(strings.TrimSpace(line[6:]))
+		case strings.HasPrefix(line, "sources: "):
+			p.Sources = parseStringArray(strings.TrimSpace(line[9:]))
+		case strings.HasPrefix(line, "created: "):
+			p.Created, _ = time.Parse("2006-01-02", strings.TrimSpace(line[9:]))
 		case strings.HasPrefix(line, "links:"):
 			inLinks, inEvidence = true, false
 		case strings.HasPrefix(line, "evidence:"):
@@ -184,6 +241,78 @@ func unescapeQuote(s string) string {
 	s = strings.ReplaceAll(s, `\"`, `"`)
 	s = strings.ReplaceAll(s, `\\`, `\`)
 	return s
+}
+
+// distinctEvidenceSources returns the distinct, first-occurrence-ordered
+// list of non-empty source_file relative paths across the given evidence.
+func distinctEvidenceSources(ev []Evidence) []string {
+	if len(ev) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(ev))
+	var out []string
+	for _, e := range ev {
+		if e.SourceFilePath == "" {
+			continue
+		}
+		if _, ok := seen[e.SourceFilePath]; ok {
+			continue
+		}
+		seen[e.SourceFilePath] = struct{}{}
+		out = append(out, e.SourceFilePath)
+	}
+	return out
+}
+
+// parseStringArray parses a flat bracketed YAML string array (the same
+// shape WritePage emits for tags / sources): `[a, b, "c, d"]`. It strips
+// the surrounding brackets, splits on commas that aren't inside a quoted
+// run, trims whitespace and a single matched-pair of surrounding quotes
+// from each element, and drops empty entries. Returns nil for an empty
+// or all-empty array so round-trips that started with `nil` stay `nil`.
+func parseStringArray(s string) []string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "[")
+	s = strings.TrimSuffix(s, "]")
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	// Comma-split that respects double-quoted runs so `"a, b"` stays one
+	// element. yamlEscapeScalar wraps any value containing a comma in
+	// double quotes, so this is sufficient for what WritePage emits.
+	var parts []string
+	var cur strings.Builder
+	inQuote := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '"' && (i == 0 || s[i-1] != '\\'):
+			inQuote = !inQuote
+			cur.WriteByte(c)
+		case c == ',' && !inQuote:
+			parts = append(parts, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	parts = append(parts, cur.String())
+
+	var out []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if len(p) >= 2 && strings.HasPrefix(p, `"`) && strings.HasSuffix(p, `"`) {
+			p = unescapeQuote(p)
+		}
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func parseIntArray(s string) []int64 {
