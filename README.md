@@ -96,6 +96,11 @@ stdio server exposing seven tools to the client:
 - `promote_answer` — lifts a saved answer into a real page with the same
   trust validation as `write_page`. See "Living Wiki" below.
 
+`mcp.ingest` accepts an optional `update_existing: bool` argument
+(default false) and, when enabled, the response gains `pages_updated` and
+`pages_update_failed` keys alongside v0.5's `retro_linked_pages` and
+`contradictions_flagged` — see "Cross-page updates (opt-in)" below.
+
 ### Claude Desktop
 
 Add this to `~/Library/Application Support/Claude/claude_desktop_config.json`
@@ -295,6 +300,10 @@ preserve the validator: every page reaching disk has at least one evidence
 quote that substring-matches its source — `promote` defensively re-validates
 because source files may have changed since the ask.
 
+v0.6's `--update-existing` flag is the most validator-hostile feature in
+the binary; it preserves the trust property by keeping the prior page
+version whenever the validator drops the proposed body.
+
 ## Living Wiki
 
 Three additive behaviours layered on v0.4 that keep the wiki current as you
@@ -377,12 +386,81 @@ Body-only, idempotent, no LLM call. Evidence rows are untouched. Open
 `.llmwiki/wiki/` in Obsidian and the graph view lights up the new
 connections immediately.
 
-### Coming in v1.3
+### Cross-page updates (opt-in)
 
-Sub-project 6b adds a cross-page page-update pass under a default-off
-`--update-existing` flag — when a new source updates earlier pages, those
-pages get their bodies refined under the same validator. Out of scope for
-v0.5.
+v0.6 adds a default-off `--update-existing` flag that, when enabled, edits
+existing pages in light of a new source — folding the new source's claims
+into the pages whose claims it refines, qualifies, contradicts, or extends.
+**Off by default** because it is the most validator-hostile operation in
+the binary.
+
+```text
+llmwiki ingest ./CHANGELOG-1.2.md --update-existing
+# Resolved to 1 source file(s)
+# [1/1] processed
+# Ingested 3 page(s) from ./CHANGELOG-1.2.md
+#   ✓ Release 1.2 Highlights (5 evidence, files: CHANGELOG-1.2.md)
+#   ✓ Living Wiki Dynamics (4 evidence, files: CHANGELOG-1.2.md)
+#   ✓ Cross-page Update Pass (6 evidence, files: CHANGELOG-1.2.md)
+#
+# Scanning 47 candidate page(s) for updates...
+#   [12/47] processed
+#
+# 7 page(s) updated:
+#   ~ Trust Property Validator   (+1 evidence)
+#   ~ Ingest Pipeline            (+2 evidence)
+#   ~ MCP write_page             (+1 evidence)
+#   ~ Obsidian Output            (+1 evidence, body rewritten)
+#   ~ Provider Abstraction       (+1 evidence)
+#   ~ Page Lifecycle             (body rewritten only)
+#   ~ Index Hub                  (+1 evidence)
+#
+# 2 page(s) update FAILED — kept at previous version:
+#   ✗ Database Layer
+#       proposed body had 0 quotes that substring-matched any source.
+#   ✗ Cassette Infrastructure
+#       proposed body had 1/3 quotes that substring-matched; below new-quote-floor of 2.
+#       to debug: re-run with --update-existing --debug-updates and compare logs.
+```
+
+A 50-page repo ingest with `--update-existing` is roughly 5–10 ingest
+calls + up to 50 update calls + up to 5 contradiction calls = up to 65
+LLM calls per ingest. On Gemini Flash (recommended for this flag) the
+daily 1500-call free tier comfortably absorbs this. On Anthropic Haiku,
+~$0.30/ingest with caching. On Ollama (local, 7B-class), expect most
+updates to be `update_failed` because small models often miss the
+structured-output schema; consider keeping `update_existing = false` on
+Ollama.
+
+Pages whose proposed update body fails validation stay at their previous
+version — never silently downgraded. The trust property holds: every page
+on disk has ≥1 evidence quote that substring-matches its source. When a
+`~ Title (update_failed)` line appears, re-run with `--debug-updates` to
+see why each candidate's quotes didn't match.
+
+Every candidate considered — `updated`, `body_only`, `failed`, `skipped`
+— appends one row to `page_update_log` in `.llmwiki/wiki.db`. To inspect:
+
+```bash
+sqlite3 .llmwiki/wiki.db "SELECT pages.title, outcome, reason
+                         FROM page_update_log
+                         JOIN pages ON pages.id = page_update_log.page_id
+                         ORDER BY created_at DESC LIMIT 20"
+```
+
+After enabling `--update-existing`, `llmwiki status` surfaces `pages
+updated total` and `pages update failed` counters.
+
+Persist the opt-in by setting `update_existing = true` in the `[ingest]`
+block of `.llmwiki/config.toml`. Tune the candidate caps via
+`update_existing_max_candidates_per_source` (default 20),
+`update_existing_max_candidates_total` (default 50), and
+`update_existing_quote_floor` (default 2).
+
+We're starting v0.6 with `--update-existing` default-off. Once we have
+real-world numbers from opt-in users, we may flip the default in v0.7 —
+track [Q11 in the spec](docs/superpowers/specs/2026-05-04-living-wiki-dynamics-design.md)
+for the discussion.
 
 ## Privacy
 

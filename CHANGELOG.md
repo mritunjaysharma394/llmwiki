@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-rc.1] — 2026-05-04
+
+### Added
+- `llmwiki ingest --update-existing` — new flag, **default off**.
+  When enabled, after writing new pages from the source, runs the
+  cross-page page-update pass: per existing page that this source
+  touches (FTS-shortlisted, capped at 20 per source / 50 per ingest),
+  proposes an updated body via one LLM call, validates the proposed
+  evidence through the same byte-exact substring-match validator
+  that gates `ingest` and `mcp.write_page`, and replaces the page
+  body on success. Pages whose proposed body fails validation stay
+  at their previous version — the trust property holds, and we
+  never silently downgrade. Costs roughly one LLM call per matched
+  candidate page; recommended on Gemini Flash (free tier comfortably
+  absorbs the fan-out). Sub-project 6 pillar 3.
+- `llmwiki ingest --debug-updates` — new flag, default off. Prints
+  per-candidate verdicts (LLM proposed body, validator kept N
+  quotes, content_hash drift) to stderr. Useful for diagnosing
+  `update_failed` summary lines.
+- `[ingest] update_existing` config key (`*bool`, default false).
+  Persists the opt-in across invocations. Three tunables alongside:
+  `update_existing_max_candidates_per_source` (default 20),
+  `update_existing_max_candidates_total` (default 50),
+  `update_existing_quote_floor` (default 2).
+- `mcp.ingest` accepts new optional `update_existing: bool`
+  argument (default false). Return shape gains `pages_updated: int`
+  and `pages_update_failed: int` (alongside v0.5's
+  `retro_linked_pages` and `contradictions_flagged`). No new MCP
+  tool — single round-trip semantics (Q10).
+- `llmwiki status` surfaces `pages updated total` and
+  `pages update failed` counters from `page_update_log` (when
+  non-zero). Pure read; no migration of pages_total / evidence_quotes.
+- Contradiction → update bridge: when `--update-existing` is on
+  AND `DetectIngestContradictions` returns non-empty, every
+  existing page that surfaced as a contradiction becomes a forced
+  candidate for the update pass (bypasses FTS shortlist + global
+  cap). Spec line 60 — "[contradiction-on-ingest] upgraded to
+  'edit existing page' once 6b lands."
+- `page_update_log` SQLite table (v4 schema migration): one row
+  per candidate per ingest, written on every outcome (`updated` /
+  `body_only` / `failed` / `skipped`). The audit trail is
+  permanent (never rotated, never truncated, Q9). Indexed on
+  `page_id` and `source_id`. New queries:
+  `db.DeleteEvidenceForPage`, `db.InsertPageUpdateLog`,
+  `db.GetPageUpdateLog`, `db.CountPageUpdateLogByOutcome`.
+
+### Changed
+- `internal/mcp` `serverVersion` bumped to `0.6.0-rc.1`.
+- Ingest order extended: (1) write new pages, (2) retro-link
+  existing pages to new titles (v0.5), (3) detect contradictions
+  (v0.5), (4) **update existing pages** (new in v0.6, gated by
+  `--update-existing`), (5) re-run retro-link over (new + updated)
+  titles, (6) regenerate index, (7) append log.
+
+### Notes
+- **Schema migration v3 → v4 is additive only** (Q8). New
+  `page_update_log` table + two indexes. No `ALTER TABLE` on
+  existing tables; `pages`, `evidence`, `sources`, `source_files`,
+  `chunks` are byte-identical pre/post v4. Roll-forward only —
+  no down-migration script.
+- `--update-existing` defaults to **off** (Q11). The validator
+  can drop a proposed page body if quotes don't substring-match
+  the (new + existing) source union; the cost picture is real
+  (~$0.30/ingest on Anthropic Haiku, free on Gemini Flash).
+  Consider flipping the default in v0.7 once we have real-world
+  numbers from opt-in users.
+- `page_update_log` is **never rotated, never truncated** (Q9).
+  At 100 ingests/year × 50 candidates × ~1 row each = 5000
+  rows/year — fine for our target wiki sizes.
+- TRUST PROPERTY REAFFIRMED. Every page reaching disk via the
+  update path has ≥1 evidence quote that substring-matches some
+  file in the union of (this source + that page's prior sources).
+  Pages with `update_failed` are byte-identical on disk to their
+  previous version.
+
 ## [0.5.0-rc.1] — 2026-05-04
 
 ### Added
@@ -150,7 +225,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   database.
 - Cassette-based LLM client for record/replay testing.
 
-[Unreleased]: https://github.com/mritunjaysharma394/llmwiki/compare/v0.5.0-rc.1...HEAD
+[Unreleased]: https://github.com/mritunjaysharma394/llmwiki/compare/v0.6.0-rc.1...HEAD
+[0.6.0-rc.1]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v0.6.0-rc.1
 [0.5.0-rc.1]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v0.5.0-rc.1
 [0.4.0]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v0.4.0
 [0.3.0]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v0.3.0
