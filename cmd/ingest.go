@@ -430,8 +430,28 @@ func runIngest(cmd *cobra.Command, args []string) error {
 	if err := os.MkdirAll(cfg.Wiki.WikiDir, 0755); err != nil {
 		return err
 	}
+	// Build the title set once: existing-on-disk titles plus the new
+	// titles in this batch. Used to rewrite bare prose references into
+	// [[wikilinks]] before each page hits disk. The set is not enforced
+	// by the validator — a body that mentions a stranger title in prose
+	// is still valid; this is a body-quality polish.
+	allTitles := make([]string, 0, len(titles)+len(allPages))
+	allTitles = append(allTitles, titles...)
+	for _, p := range allPages {
+		allTitles = append(allTitles, p.Title)
+	}
+	now := time.Now().UTC()
+	totalEvidence := 0
 	for i := range allPages {
 		allPages[i].SourceIDs = []int64{sourceID}
+		// Phase F: wikilink rewrite + Dataview frontmatter stamps.
+		allPages[i].Body = wiki.RewriteBareReferencesAsWikilinks(allPages[i].Body, allTitles)
+		allPages[i].Tags = []string{"llmwiki", "ingest"}
+		allPages[i].Sources = distinctSourceFiles(allPages[i].Evidence)
+		if allPages[i].Created.IsZero() {
+			allPages[i].Created = now
+		}
+		totalEvidence += len(allPages[i].Evidence)
 		path := wiki.PagePath(cfg.Wiki.WikiDir, allPages[i].Title)
 		if err := wiki.WritePage(allPages[i], cfg.Wiki.WikiDir); err != nil {
 			return fmt.Errorf("writing page %q: %w", allPages[i].Title, err)
@@ -494,7 +514,50 @@ func runIngest(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  ✓ %s (%d evidence%s)\n", allPages[i].Title, len(allPages[i].Evidence), annotation)
 	}
 	fmt.Printf("Ingested %d page(s) from %s\n", len(allPages), source)
+
+	// Phase F: regenerate the Obsidian index against the current DB state,
+	// then append a single chronicle line for this ingest run. Both are
+	// best-effort — a failure does not undo the per-page disk writes
+	// already done above. Failures go to stderr so the user still sees
+	// the wiki was updated even if the side files needed attention.
+	allPageRecs, err := database.AllPages()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  WARN reading pages for index: %v\n", err)
+	} else {
+		allSources, _ := database.GetAllSources()
+		if err := wiki.RegenerateIndex(cfg.Wiki.WikiDir, allPageRecs, allSources, time.Now().UTC()); err != nil {
+			fmt.Fprintf(os.Stderr, "  WARN regenerating index.md: %v\n", err)
+		}
+	}
+	_ = wiki.AppendLog(cfg.Wiki.WikiDir, wiki.LogEntry{
+		At:   time.Now().UTC(),
+		Kind: "ingest",
+		Payload: fmt.Sprintf("%s → %d pages, %d evidence quotes",
+			source, len(allPages), totalEvidence),
+	})
 	return nil
+}
+
+// distinctSourceFiles returns the distinct, first-occurrence-ordered list of
+// non-empty SourceFilePath values across the given evidence rows. Used by the
+// Phase F ingest wiring to populate Page.Sources before WritePage.
+func distinctSourceFiles(ev []wiki.Evidence) []string {
+	if len(ev) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(ev))
+	var out []string
+	for _, e := range ev {
+		if e.SourceFilePath == "" {
+			continue
+		}
+		if _, ok := seen[e.SourceFilePath]; ok {
+			continue
+		}
+		seen[e.SourceFilePath] = struct{}{}
+		out = append(out, e.SourceFilePath)
+	}
+	return out
 }
 
 func slugify(s string) string {

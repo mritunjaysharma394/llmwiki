@@ -173,6 +173,15 @@ func runAsk(cmd *cobra.Command, args []string) error {
 			fmt.Printf("\nsaved: %s\n", filePath)
 		}
 	}
+
+	// Phase F: chronicle this ask in log.md. Best-effort — a write
+	// failure here does not invalidate the answer the user already saw.
+	_ = wiki.AppendLog(cfg.Wiki.WikiDir, wiki.LogEntry{
+		At:   time.Now().UTC(),
+		Kind: "ask",
+		Payload: fmt.Sprintf("%q → %d chars, %d sources",
+			question, len(answer), len(pages)),
+	})
 	return nil
 }
 

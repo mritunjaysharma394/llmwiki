@@ -18,7 +18,7 @@ type IngestResult struct {
 
 var writePagesTool = llm.ToolSchema{
 	Name:        "write_pages",
-	Description: "Write wiki pages synthesized from the ingested source content. Every page MUST include verbatim evidence quotes from the source.",
+	Description: "Write wiki pages synthesized from the ingested source content. Every page MUST include verbatim evidence quotes from the source. When a page body references another page that already exists or is being created in this same call, prefer the [[Page Title]] wikilink syntax over bare prose.",
 	Properties: map[string]any{
 		"pages": map[string]any{
 			"type":        "array",

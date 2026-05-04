@@ -414,6 +414,110 @@ api_key_env = "OPENROUTER_API_KEY"
 	}
 }
 
+// TestDistinctSourceFiles is a quick guard on the helper Phase F added to
+// stamp Page.Sources before WritePage. Mirrors the wiki package's
+// distinctEvidenceSources contract: distinct, first-occurrence-ordered,
+// non-empty paths only.
+func TestDistinctSourceFiles(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []wiki.Evidence
+		want []string
+	}{
+		{"empty", nil, nil},
+		{"all-empty-paths", []wiki.Evidence{{Quote: "x"}, {Quote: "y"}}, nil},
+		{"distinct order", []wiki.Evidence{
+			{Quote: "a", SourceFilePath: "x.go"},
+			{Quote: "b", SourceFilePath: "y.go"},
+			{Quote: "c", SourceFilePath: "x.go"},
+		}, []string{"x.go", "y.go"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := distinctSourceFiles(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("len got %d want %d (%v)", len(got), len(tc.want), got)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("[%d] got %q want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestIngest_GeneratesIndexAndLog asserts that after a successful ingest,
+// cfg.Wiki.WikiDir/index.md lists every written page via [[Title]] and
+// cfg.Wiki.WikiDir/log.md ends with an **ingest** chronicle line. Skips
+// when no cassette is recorded — same gating as TestIngestGemini, since
+// the integration path needs a deterministic LLM response.
+func TestIngest_GeneratesIndexAndLog(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping cassette test in -short mode")
+	}
+	cassette := filepath.Join(realCassetteDir(t), "TestIngestGemini__001.json")
+	if _, err := os.Stat(cassette); os.IsNotExist(err) {
+		t.Skip("cassette not recorded; reuses TestIngestGemini__001.json — record that first")
+	}
+	t.Setenv("LLMWIKI_CASSETTE", "TestIngestGemini")
+	t.Setenv("GEMINI_API_KEY", "test-key-for-replay")
+
+	source := "Goroutines are lightweight threads of execution managed by the Go runtime.\nThe `go` keyword starts a goroutine.\nGoroutines communicate via channels.\n"
+	configBody := `[llm]
+provider = "gemini"
+model = "gemini-2.0-flash"
+
+[wiki]
+wiki_dir = ".llmwiki/wiki"
+raw_dir = ".llmwiki/raw"
+db_path = ".llmwiki/wiki.db"
+`
+	pages := runIngestThroughLoadConfig(t, source, configBody)
+	if len(pages) == 0 {
+		t.Fatal("got 0 pages")
+	}
+
+	indexPath := filepath.Join(cfg.Wiki.WikiDir, "index.md")
+	idxBody, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatalf("reading index.md: %v", err)
+	}
+	idx := string(idxBody)
+	if !strings.Contains(idx, "title: index") {
+		t.Errorf("index.md missing frontmatter title:\n%s", idx)
+	}
+	if !strings.Contains(idx, "generator: llmwiki") {
+		t.Errorf("index.md missing generator marker:\n%s", idx)
+	}
+	for _, p := range pages {
+		// Skip the index file itself — it's discovered by the wiki dir read
+		// in runIngestThroughLoadConfig and round-trips through ParsePage.
+		if p.Title == "index" {
+			continue
+		}
+		want := "[[" + p.Title + "]]"
+		if !strings.Contains(idx, want) {
+			t.Errorf("index.md missing wikilink %q for ingested page", want)
+		}
+	}
+
+	logPath := filepath.Join(cfg.Wiki.WikiDir, "log.md")
+	logBody, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading log.md: %v", err)
+	}
+	logStr := strings.TrimRight(string(logBody), "\n")
+	lines := strings.Split(logStr, "\n")
+	if len(lines) == 0 {
+		t.Fatal("log.md has no lines")
+	}
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, "**ingest**") {
+		t.Errorf("last log line not an ingest entry: %q", last)
+	}
+}
+
 // sanity assertion: paths in `gone` are returned in arbitrary order; tests
 // shouldn't depend on map iteration order.
 func TestPartitionGoneSortable(t *testing.T) {
