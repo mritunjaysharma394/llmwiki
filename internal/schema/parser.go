@@ -280,11 +280,32 @@ func splitH2Sections(body []byte) (map[string]section, error) {
 	return out, nil
 }
 
-// parseOntology walks the Page ontology body and pulls out each
-// bullet of the form "  - name (type) description". Position in the
-// list is the canonical mapping (position 0 = title, 1 = body, etc.).
+// canonicalSet is canonicalOntologyFields as a set for O(1) lookup.
+var canonicalSet = func() map[string]bool {
+	m := make(map[string]bool, len(canonicalOntologyFields))
+	for _, n := range canonicalOntologyFields {
+		m[n] = true
+	}
+	return m
+}()
+
+// parseOntology walks the Page ontology body and pulls out each bullet
+// of the form "  - name (type) description". Canonical mapping rules:
+//
+//   1. If the declared name matches a canonical name (e.g. "title",
+//      "evidence"), CanonicalName == DeclaredName regardless of
+//      position. The user is calling the field by its canonical name;
+//      that's authoritative.
+//   2. If the declared name is NOT a canonical name (e.g. "citations"),
+//      it is a rename. The canonical it maps to is determined by the
+//      position-stable bundled order, treating canonical-named fields
+//      as already-bound. So "title, body, citations" maps citations
+//      to position 2 (= evidence).
+//   3. Anything past position len(canonicalOntologyFields)-1 is an
+//      extra field; CanonicalName == DeclaredName (pass-through, Q9).
 func parseOntology(body string) ([]OntologyField, error) {
 	var fields []OntologyField
+	used := make(map[string]bool) // canonical names already taken
 	scanner := bufio.NewScanner(strings.NewReader(body))
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -295,14 +316,25 @@ func parseOntology(body string) ([]OntologyField, error) {
 		declared := strings.TrimSpace(m[1])
 		typ := strings.TrimSpace(m[2])
 		desc := strings.TrimSpace(m[3])
-		canonical := declared
-		// Position-stable canonical mapping: the i-th bullet maps to
-		// canonicalOntologyFields[i] when in range. Out-of-range
-		// bullets keep their declared name as canonical (extra fields
-		// are pass-through, see Q9).
-		if i := len(fields); i < len(canonicalOntologyFields) {
-			canonical = canonicalOntologyFields[i]
+
+		var canonical string
+		if canonicalSet[declared] {
+			// Declared name IS a canonical name — bind to itself.
+			canonical = declared
+			used[canonical] = true
+		} else {
+			// Declared name is a rename. Find the next free canonical
+			// slot in the bundled order.
+			canonical = declared
+			for _, c := range canonicalOntologyFields {
+				if !used[c] {
+					canonical = c
+					used[c] = true
+					break
+				}
+			}
 		}
+
 		fields = append(fields, OntologyField{
 			CanonicalName: canonical,
 			DeclaredName:  declared,

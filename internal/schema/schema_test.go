@@ -393,3 +393,177 @@ func TestLoad_ParsesAGENTSMdWhenPresent(t *testing.T) {
 		t.Errorf("Hash() = %q, want %q (sha256 of fixture bytes)", s.Hash(), want)
 	}
 }
+
+// ---------- Task 3: Render + Validate ----------
+
+func TestRender_InterpolatesKnownPlaceholders(t *testing.T) {
+	s := Bundled()
+	got := s.Render("hello {{name}}", map[string]string{"name": "world"})
+	if got != "hello world" {
+		t.Errorf("Render = %q, want %q", got, "hello world")
+	}
+}
+
+func TestRender_LeavesUnknownPlaceholdersIntact(t *testing.T) {
+	s := Bundled()
+	got := s.Render("hello {{name}}", nil)
+	if got != "hello {{name}}" {
+		t.Errorf("Render = %q, want %q", got, "hello {{name}}")
+	}
+}
+
+func TestRender_WarnsOncePerUnknownPlaceholder(t *testing.T) {
+	// Capture stderr.
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	defer func() { os.Stderr = origStderr }()
+
+	// Use a unique placeholder name so we are not contaminated by other
+	// tests running first in this process.
+	prompt := "hello {{warn_once_test_zzz}}"
+	s := Bundled()
+	_ = s.Render(prompt, nil)
+	_ = s.Render(prompt, nil)
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("pipe close: %v", err)
+	}
+	var sb strings.Builder
+	buf := make([]byte, 4096)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			sb.Write(buf[:n])
+		}
+		if err != nil {
+			break
+		}
+	}
+	got := sb.String()
+	count := strings.Count(got, "warn_once_test_zzz")
+	if count != 1 {
+		t.Errorf("WARN occurrences = %d, want 1; output: %q", count, got)
+	}
+	if !strings.Contains(got, "WARN") {
+		t.Errorf("expected a WARN line, got: %q", got)
+	}
+}
+
+func TestRender_HandlesEmptyVarsMap(t *testing.T) {
+	s := Bundled()
+	got := s.Render("no placeholders", nil)
+	if got != "no placeholders" {
+		t.Errorf("Render = %q, want %q", got, "no placeholders")
+	}
+}
+
+func TestRender_MultiplePlaceholders(t *testing.T) {
+	s := Bundled()
+	got := s.Render("{{a}} {{b}} {{a}}", map[string]string{"a": "X", "b": "Y"})
+	if got != "X Y X" {
+		t.Errorf("Render = %q, want %q", got, "X Y X")
+	}
+}
+
+func TestValidate_BundledIsValid(t *testing.T) {
+	if err := Bundled().Validate(); err != nil {
+		t.Fatalf("Bundled().Validate() = %v, want nil", err)
+	}
+}
+
+func TestValidate_MissingRequiredPlaceholder_Errors(t *testing.T) {
+	// Strip {{domain}} from the Ingest prompt section.
+	doc := strings.Replace(
+		fixtureAllSections,
+		"Ingest under {{domain}}. Existing titles: {{existing_titles}}.",
+		"Ingest. Existing titles: {{existing_titles}}.",
+		1,
+	)
+	s, err := Parse([]byte(doc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	verr := s.Validate()
+	if verr == nil {
+		t.Fatal("Validate: expected error, got nil")
+	}
+	if !strings.Contains(verr.Error(), "Ingest prompt") {
+		t.Errorf("error = %v, want substring 'Ingest prompt'", verr)
+	}
+	if !strings.Contains(verr.Error(), "{{domain}}") {
+		t.Errorf("error = %v, want substring '{{domain}}'", verr)
+	}
+}
+
+func TestValidate_MissingRequiredOntologyField_Errors(t *testing.T) {
+	// Drop the `evidence` row from the ontology.
+	doc := strings.Replace(
+		fixtureAllSections,
+		"  - evidence (list of quotes) required\n",
+		"",
+		1,
+	)
+	s, err := Parse([]byte(doc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	verr := s.Validate()
+	if verr == nil {
+		t.Fatal("Validate: expected error, got nil")
+	}
+	if !strings.Contains(verr.Error(), "evidence") {
+		t.Errorf("error = %v, want substring 'evidence'", verr)
+	}
+}
+
+func TestValidate_OntologyRenameAllowed(t *testing.T) {
+	// Rename `evidence` to `citations`. The canonical mapping at
+	// position 2 still resolves to evidence, so Validate is happy.
+	doc := strings.Replace(
+		fixtureAllSections,
+		"  - evidence (list of quotes) required\n",
+		"  - citations (list of quotes) required\n",
+		1,
+	)
+	s, err := Parse([]byte(doc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := s.Validate(); err != nil {
+		t.Errorf("Validate: rename is allowed; got %v", err)
+	}
+}
+
+func TestValidate_OntologyDropRequiredField_Errors(t *testing.T) {
+	// Strip all three required fields from the ontology section.
+	doc := strings.Replace(
+		fixtureAllSections,
+		"## Page ontology\n\n  - title (string) the page's primary key\n  - body (markdown) the page's narrative\n  - evidence (list of quotes) required\n",
+		"## Page ontology\n\n  - tags (list of strings) only tags here\n",
+		1,
+	)
+	s, err := Parse([]byte(doc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	verr := s.Validate()
+	if verr == nil {
+		t.Fatal("Validate: expected error, got nil")
+	}
+	// MultiError surfaces all three at once.
+	var me MultiError
+	if !errors.As(verr, &me) {
+		t.Fatalf("error not MultiError: %T %v", verr, verr)
+	}
+	wantSubs := []string{"title", "body", "evidence"}
+	combined := me.Error()
+	for _, w := range wantSubs {
+		if !strings.Contains(combined, w) {
+			t.Errorf("MultiError.Error() = %q, missing substring %q", combined, w)
+		}
+	}
+}

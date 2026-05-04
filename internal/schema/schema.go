@@ -15,7 +15,10 @@ package schema
 import (
 	"crypto/sha256"
 	"fmt"
+	"os"
+	"regexp"
 	"strings"
+	"sync"
 )
 
 // SchemaFormatVersion is the schema doc format version this binary
@@ -140,3 +143,124 @@ func (s Schema) Hash() string {
 
 // Raw returns the on-disk bytes; used by `schema show --doc`.
 func (s Schema) Raw() []byte { return s.raw }
+
+// placeholderRE matches a `{{name}}` token where name is one or more
+// word characters (Q3: not text/template; the schema is a doc the
+// user reads, not a Go-template-coupled artefact).
+var placeholderRE = regexp.MustCompile(`\{\{(\w+)\}\}`)
+
+// warnedPlaceholders tracks which (prompt, name) pairs we have already
+// warned about, so Render emits one WARN per unknown placeholder per
+// process. Keyed on a sha256 of the prompt body + name to keep memory
+// bounded on a long-running process.
+var warnedPlaceholders sync.Map
+
+// Render replaces every {{name}} in prompt with vars[name]. Unknown
+// names are left intact (forward-compat: a future binary may
+// interpolate them). Emits one WARN per unknown name per process
+// keyed on the prompt body so two distinct prompts each get one warn
+// for the same unknown name.
+func (s Schema) Render(prompt string, vars map[string]string) string {
+	return placeholderRE.ReplaceAllStringFunc(prompt, func(m string) string {
+		name := m[2 : len(m)-2]
+		if v, ok := vars[name]; ok {
+			return v
+		}
+		warnUnknownPlaceholderOnce(prompt, name)
+		return m
+	})
+}
+
+// warnUnknownPlaceholderOnce emits one WARN per (prompt, name) pair
+// per process. The key is sha256(prompt) + ":" + name so a long-lived
+// process does not retain the full prompt body in the warn map.
+func warnUnknownPlaceholderOnce(prompt, name string) {
+	key := fmt.Sprintf("%x:%s", sha256.Sum256([]byte(prompt)), name)
+	if _, loaded := warnedPlaceholders.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "WARN: schema: unknown placeholder {{%s}} in prompt; leaving intact\n", name)
+}
+
+// requiredPromptPlaceholders maps prompt names (as they appear on the
+// Schema.Prompts field) to the set of placeholders Validate enforces.
+// The list mirrors the table in the plan's Task 3 Step 3.
+var requiredPromptPlaceholders = map[string][]string{
+	"Ingest prompt":           {"domain", "existing_titles"},
+	"Update-existing prompt":  {"domain", "existing_page_body", "existing_evidence"},
+	"Ask prompt":              {"domain"},
+	"Contradiction prompt":    nil,
+	"Promote rewrite prompt":  {"question", "answer_body", "evidence_quotes"},
+	"Lint contradictions prompt": nil,
+}
+
+// requiredOntologyFields are the canonical names that must appear in
+// the parsed ontology. The user may rename them (declared name differs
+// from canonical), but they MUST be present at their canonical
+// position in the field list — which Parse guarantees via positional
+// canonical mapping.
+var requiredOntologyFields = []string{"title", "body", "evidence"}
+
+// Validate enforces the required-prompt + required-placeholder +
+// required-ontology-field contracts. Returns MultiError surfacing all
+// problems at once so cmd/schema.go's `schema validate` can render
+// every file:line column in one shot rather than the user fixing one
+// error, re-running, fixing the next. Returns nil on success.
+//
+// TRUST PROPERTY UNCHANGED. Validate is purely structural. It does NOT
+// verify the prompt is *good* — a user can write a schema that
+// validates but produces awful pages. The validator (bundled,
+// unreachable from this package) is the gate that protects the
+// trust property.
+func (s Schema) Validate() error {
+	var errs []ValidationError
+
+	type promptCheck struct {
+		section string
+		body    string
+	}
+	checks := []promptCheck{
+		{"Ingest prompt", s.Prompts.Ingest},
+		{"Update-existing prompt", s.Prompts.UpdateExisting},
+		{"Ask prompt", s.Prompts.Ask},
+		{"Contradiction prompt", s.Prompts.Contradiction},
+		{"Promote rewrite prompt", s.Prompts.PromoteRewrite},
+		{"Lint contradictions prompt", s.Prompts.LintContradictions},
+	}
+	for _, c := range checks {
+		if strings.TrimSpace(c.body) == "" {
+			errs = append(errs, ValidationError{
+				Section: c.section,
+				Problem: "prompt body is empty",
+			})
+			continue
+		}
+		for _, ph := range requiredPromptPlaceholders[c.section] {
+			token := "{{" + ph + "}}"
+			if !strings.Contains(c.body, token) {
+				errs = append(errs, ValidationError{
+					Section: c.section,
+					Problem: fmt.Sprintf("missing required placeholder %s", token),
+				})
+			}
+		}
+	}
+
+	declaredCanonical := make(map[string]bool, len(s.Ontology.Fields))
+	for _, f := range s.Ontology.Fields {
+		declaredCanonical[f.CanonicalName] = true
+	}
+	for _, f := range requiredOntologyFields {
+		if !declaredCanonical[f] {
+			errs = append(errs, ValidationError{
+				Section: "Page ontology",
+				Problem: fmt.Sprintf("missing required field: %s", f),
+			})
+		}
+	}
+
+	if len(errs) == 0 {
+		return nil
+	}
+	return MultiError{Errors: errs}
+}
