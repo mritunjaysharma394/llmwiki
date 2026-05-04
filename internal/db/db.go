@@ -201,6 +201,45 @@ func (d *DB) migrate() error {
 		}
 	}
 
+	if version < 5 {
+		// Sub-project 7 (v0.7) — additive, schema_hash column on pages.
+		//
+		// Stamps the active schema's hash on every page-write so the lint
+		// and status surfaces can surface schema_drift counters and
+		// `llmwiki schema migrate` can resume by skipping pages already at
+		// the active hash.
+		//
+		// PRAGMA table_info(pages) check makes the migration idempotent
+		// without ALTER TABLE IF NOT EXISTS (which SQLite doesn't have).
+		var hasCol bool
+		rows, err := d.sql.Query(`PRAGMA table_info(pages)`)
+		if err != nil {
+			return fmt.Errorf("v5 migration: read table_info(pages): %w", err)
+		}
+		for rows.Next() {
+			var cid int
+			var name, ctype string
+			var notnull, pk int
+			var dflt sql.NullString
+			if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+				rows.Close()
+				return fmt.Errorf("v5 migration: scan table_info(pages): %w", err)
+			}
+			if name == "schema_hash" {
+				hasCol = true
+			}
+		}
+		rows.Close()
+		if !hasCol {
+			if _, err := d.sql.Exec(`ALTER TABLE pages ADD COLUMN schema_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("v5 migration: %w", err)
+			}
+		}
+		if _, err := d.sql.Exec(`PRAGMA user_version = 5`); err != nil {
+			return fmt.Errorf("v5 migration user_version bump: %w", err)
+		}
+	}
+
 	if _, err := d.sql.Exec(`PRAGMA foreign_keys = ON`); err != nil {
 		return fmt.Errorf("enable foreign_keys: %w", err)
 	}

@@ -29,8 +29,8 @@ func TestOpenCreatesEvidenceAndSavedAnswers(t *testing.T) {
 	if err := d.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("user_version: %v", err)
 	}
-	if version != 4 {
-		t.Errorf("user_version = %d, want 4", version)
+	if version != 5 {
+		t.Errorf("user_version = %d, want 5", version)
 	}
 }
 
@@ -51,8 +51,8 @@ func TestOpenIsIdempotent(t *testing.T) {
 	if err := d2.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("user_version: %v", err)
 	}
-	if version != 4 {
-		t.Errorf("user_version after re-open = %d, want 4", version)
+	if version != 5 {
+		t.Errorf("user_version after re-open = %d, want 5", version)
 	}
 }
 
@@ -76,8 +76,8 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 	defer d2.Close()
 	var version int
 	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&version)
-	if version != 4 {
-		t.Errorf("user_version after upgrade = %d, want 4", version)
+	if version != 5 {
+		t.Errorf("user_version after upgrade = %d, want 5", version)
 	}
 }
 
@@ -112,8 +112,8 @@ func TestOpenAtFreshV2(t *testing.T) {
 	}
 	var version int
 	d.sql.QueryRow(`PRAGMA user_version`).Scan(&version)
-	if version != 4 {
-		t.Errorf("user_version = %d, want 4", version)
+	if version != 5 {
+		t.Errorf("user_version = %d, want 5", version)
 	}
 }
 
@@ -137,8 +137,8 @@ func TestOpenUpgradesV1ToV2(t *testing.T) {
 	defer d2.Close()
 	var v int
 	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v)
-	if v != 4 {
-		t.Errorf("user_version after upgrade = %d, want 4", v)
+	if v != 5 {
+		t.Errorf("user_version after upgrade = %d, want 5", v)
 	}
 	var name string
 	if err := d2.sql.QueryRow(`SELECT name FROM sqlite_master WHERE name = 'source_files'`).Scan(&name); err != nil {
@@ -166,8 +166,8 @@ func TestOpenUpgradesLegacyV0ToV2(t *testing.T) {
 	defer d2.Close()
 	var v int
 	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v)
-	if v != 4 {
-		t.Errorf("user_version after v0->v2 upgrade = %d, want 4", v)
+	if v != 5 {
+		t.Errorf("user_version after v0->v2 upgrade = %d, want 5", v)
 	}
 }
 
@@ -179,8 +179,8 @@ func TestOpenAtFreshV3(t *testing.T) {
 	}
 	var version int
 	d.sql.QueryRow(`PRAGMA user_version`).Scan(&version)
-	if version != 4 {
-		t.Errorf("user_version = %d, want 4", version)
+	if version != 5 {
+		t.Errorf("user_version = %d, want 5", version)
 	}
 }
 
@@ -202,8 +202,8 @@ func TestOpenUpgradesV2ToV3(t *testing.T) {
 	defer d2.Close()
 	var v int
 	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v)
-	if v != 4 {
-		t.Errorf("user_version after upgrade = %d, want 4", v)
+	if v != 5 {
+		t.Errorf("user_version after upgrade = %d, want 5", v)
 	}
 }
 
@@ -458,8 +458,8 @@ func TestMigrate_FromFresh_LandsAtV4(t *testing.T) {
 	if err := d.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("user_version: %v", err)
 	}
-	if version != 4 {
-		t.Errorf("user_version = %d, want 4", version)
+	if version != 5 {
+		t.Errorf("user_version = %d, want 5", version)
 	}
 	var name string
 	if err := d.sql.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='page_update_log'`).Scan(&name); err != nil {
@@ -490,8 +490,8 @@ func TestMigrate_FromV3_AddsPageUpdateLog(t *testing.T) {
 	if err := d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
 		t.Fatalf("user_version: %v", err)
 	}
-	if v != 4 {
-		t.Errorf("user_version after upgrade = %d, want 4", v)
+	if v != 5 {
+		t.Errorf("user_version after upgrade = %d, want 5", v)
 	}
 	expectedCols := map[string]bool{
 		"id": false, "page_id": false, "source_id": false,
@@ -541,8 +541,8 @@ func TestMigrate_Idempotent_RerunningOnV4_IsNoop(t *testing.T) {
 	if err := d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
 		t.Fatalf("user_version: %v", err)
 	}
-	if v != 4 {
-		t.Errorf("user_version = %d, want 4", v)
+	if v != 5 {
+		t.Errorf("user_version = %d, want 5", v)
 	}
 	var name string
 	if err := d2.sql.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='page_update_log'`).Scan(&name); err != nil {
@@ -603,6 +603,309 @@ func TestMigrate_PageUpdateLogIndexesExist(t *testing.T) {
 		var name string
 		if err := d.sql.QueryRow(`SELECT name FROM sqlite_master WHERE type='index' AND name=?`, idx).Scan(&name); err != nil {
 			t.Errorf("index %q missing: %v", idx, err)
+		}
+	}
+}
+
+// --- Sub-project 7 (v0.7) — Phase D / Task 7 — schema_hash column ---
+
+// TestMigrate_FromFresh_LandsAtV5 — open a fresh DB; PRAGMA user_version
+// returns 5; pages.schema_hash exists, TEXT, NOT NULL, default ''.
+func TestMigrate_FromFresh_LandsAtV5(t *testing.T) {
+	d := mustOpen(t)
+	var version int
+	if err := d.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("user_version: %v", err)
+	}
+	if version != 5 {
+		t.Errorf("user_version = %d, want 5", version)
+	}
+	rows, err := d.sql.Query(`PRAGMA table_info(pages)`)
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(pages): %v", err)
+	}
+	defer rows.Close()
+	var found bool
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if name == "schema_hash" {
+			found = true
+			if !strings.EqualFold(ctype, "TEXT") {
+				t.Errorf("schema_hash type = %q, want TEXT", ctype)
+			}
+			if notnull != 1 {
+				t.Errorf("schema_hash notnull = %d, want 1", notnull)
+			}
+			// SQLite stores DEFAULT '' as the literal "''" in the dflt
+			// column; tolerate both quoting styles.
+			s, ok := dflt.(string)
+			if !ok || (s != "''" && s != "") {
+				t.Errorf("schema_hash default = %v (%T), want '' literal", dflt, dflt)
+			}
+		}
+	}
+	if !found {
+		t.Error("pages.schema_hash column missing on fresh DB")
+	}
+}
+
+// TestMigrate_FromV4_AddsSchemaHash — force user_version=4, build the
+// v4 schema by hand, insert a v4-shaped pages row, reopen via db.Open,
+// assert user_version=5, the existing row's schema_hash is '', and a
+// new insert can set schema_hash to a non-empty value.
+func TestMigrate_FromV4_AddsSchemaHash(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wiki.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// Drop the v5 column by recreating pages without schema_hash, then
+	// force user_version back to 4. We use sqlite's "create-rename-copy"
+	// dance because SQLite has no DROP COLUMN before 3.35 and modernc's
+	// shipped version may differ across builds.
+	stmts := []string{
+		`DROP TRIGGER IF EXISTS pages_ai`,
+		`DROP TRIGGER IF EXISTS pages_au`,
+		`DROP TRIGGER IF EXISTS pages_ad`,
+		`DROP TABLE IF EXISTS pages_fts`,
+		`ALTER TABLE pages RENAME TO pages_old`,
+		`CREATE TABLE pages (
+			id INTEGER PRIMARY KEY,
+			title TEXT UNIQUE,
+			path TEXT,
+			body TEXT,
+			content_hash TEXT,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			source_ids TEXT DEFAULT '[]'
+		)`,
+		`INSERT INTO pages (id, title, path, body, content_hash, updated_at, source_ids)
+			SELECT id, title, path, body, content_hash, updated_at, source_ids FROM pages_old`,
+		`DROP TABLE pages_old`,
+		`PRAGMA user_version = 4`,
+	}
+	for _, s := range stmts {
+		if _, err := d.sql.Exec(s); err != nil {
+			t.Fatalf("force v4: %q: %v", s[:min(40, len(s))], err)
+		}
+	}
+	// Insert a v4-shape row directly (no schema_hash column to fill).
+	if _, err := d.sql.Exec(`INSERT INTO pages (title, path, body, content_hash, source_ids)
+		VALUES (?, ?, ?, ?, ?)`,
+		"Pre-V5 Page", "wiki/Pre-V5 Page.md", "body", "h1", "[]"); err != nil {
+		t.Fatalf("insert v4 row: %v", err)
+	}
+	d.Close()
+
+	// Reopen — v5 migration should fire.
+	d2, err := Open(path)
+	if err != nil {
+		t.Fatalf("re-Open: %v", err)
+	}
+	defer d2.Close()
+	var v int
+	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v)
+	if v != 5 {
+		t.Errorf("user_version after upgrade = %d, want 5", v)
+	}
+	var got string
+	if err := d2.sql.QueryRow(`SELECT schema_hash FROM pages WHERE title = ?`, "Pre-V5 Page").Scan(&got); err != nil {
+		t.Fatalf("SELECT schema_hash: %v", err)
+	}
+	if got != "" {
+		t.Errorf("pre-v5 row schema_hash = %q, want empty", got)
+	}
+	// New insert can set non-empty schema_hash.
+	if _, err := d2.sql.Exec(`INSERT INTO pages (title, path, body, content_hash, source_ids, schema_hash)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		"Post-V5 Page", "wiki/Post-V5 Page.md", "body", "h2", "[]", "abc123"); err != nil {
+		t.Fatalf("insert v5 row: %v", err)
+	}
+	var got2 string
+	if err := d2.sql.QueryRow(`SELECT schema_hash FROM pages WHERE title = ?`, "Post-V5 Page").Scan(&got2); err != nil {
+		t.Fatalf("SELECT schema_hash post: %v", err)
+	}
+	if got2 != "abc123" {
+		t.Errorf("post-v5 schema_hash = %q, want abc123", got2)
+	}
+}
+
+// TestMigrate_Idempotent_RerunningOnV5_IsNoop — open a v5 DB twice;
+// no errors, the schema_hash column does not duplicate.
+func TestMigrate_Idempotent_RerunningOnV5_IsNoop(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wiki.db")
+	d1, err := Open(path)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	d1.Close()
+	d2, err := Open(path)
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	defer d2.Close()
+	var v int
+	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v)
+	if v != 5 {
+		t.Errorf("user_version = %d, want 5", v)
+	}
+	rows, err := d2.sql.Query(`PRAGMA table_info(pages)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if name == "schema_hash" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("schema_hash column appeared %d times, want 1", count)
+	}
+}
+
+// TestMigrate_PreV5RowsHaveEmptySchemaHash — pre-seed a v4 DB with three
+// pages, migrate, assert all three have schema_hash = ''.
+func TestMigrate_PreV5RowsHaveEmptySchemaHash(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wiki.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	stmts := []string{
+		`DROP TRIGGER IF EXISTS pages_ai`,
+		`DROP TRIGGER IF EXISTS pages_au`,
+		`DROP TRIGGER IF EXISTS pages_ad`,
+		`DROP TABLE IF EXISTS pages_fts`,
+		`ALTER TABLE pages RENAME TO pages_old`,
+		`CREATE TABLE pages (
+			id INTEGER PRIMARY KEY,
+			title TEXT UNIQUE,
+			path TEXT,
+			body TEXT,
+			content_hash TEXT,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			source_ids TEXT DEFAULT '[]'
+		)`,
+		`INSERT INTO pages (id, title, path, body, content_hash, updated_at, source_ids)
+			SELECT id, title, path, body, content_hash, updated_at, source_ids FROM pages_old`,
+		`DROP TABLE pages_old`,
+		`PRAGMA user_version = 4`,
+	}
+	for _, s := range stmts {
+		if _, err := d.sql.Exec(s); err != nil {
+			t.Fatalf("force v4: %v", err)
+		}
+	}
+	for _, title := range []string{"P1", "P2", "P3"} {
+		if _, err := d.sql.Exec(`INSERT INTO pages (title, path, body, content_hash, source_ids)
+			VALUES (?, ?, ?, ?, ?)`, title, "wiki/"+title+".md", "body", "h", "[]"); err != nil {
+			t.Fatalf("seed %s: %v", title, err)
+		}
+	}
+	d.Close()
+
+	d2, err := Open(path)
+	if err != nil {
+		t.Fatalf("re-Open: %v", err)
+	}
+	defer d2.Close()
+	var n int
+	if err := d2.sql.QueryRow(`SELECT COUNT(*) FROM pages WHERE schema_hash = ''`).Scan(&n); err != nil {
+		t.Fatalf("count empty schema_hash: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("rows with empty schema_hash = %d, want 3", n)
+	}
+}
+
+// TestMigrate_DoesNotAlterEvidenceSourcesSourceFilesChunksPageUpdateLog —
+// captures sqlite_master rows for the four other tables on a v4 DB,
+// reopens at v5, asserts byte-identical for each unchanged table. The
+// fixture forces the DB back to v4 first (via the rename dance), then
+// captures `before`, then closes + reopens to trigger the v5 migration,
+// and finally compares — so the only delta in scope is the v4->v5 step
+// itself (the fixture's rename of `pages` is not in the comparison
+// window because we capture after it has already run).
+func TestMigrate_DoesNotAlterEvidenceSourcesSourceFilesChunksPageUpdateLog(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wiki.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// Force back to v4 with the v4-shape pages table (no schema_hash). We
+	// disable FK during the rename to avoid SQLite rewriting the FK
+	// pointers in dependent tables — those rewrites are noise from the
+	// fixture, not from the migration under test.
+	stmts := []string{
+		`PRAGMA foreign_keys = OFF`,
+		`PRAGMA legacy_alter_table = ON`,
+		`DROP TRIGGER IF EXISTS pages_ai`,
+		`DROP TRIGGER IF EXISTS pages_au`,
+		`DROP TRIGGER IF EXISTS pages_ad`,
+		`DROP TABLE IF EXISTS pages_fts`,
+		`ALTER TABLE pages RENAME TO pages_old`,
+		`CREATE TABLE pages (
+			id INTEGER PRIMARY KEY,
+			title TEXT UNIQUE,
+			path TEXT,
+			body TEXT,
+			content_hash TEXT,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			source_ids TEXT DEFAULT '[]'
+		)`,
+		`INSERT INTO pages (id, title, path, body, content_hash, updated_at, source_ids)
+			SELECT id, title, path, body, content_hash, updated_at, source_ids FROM pages_old`,
+		`DROP TABLE pages_old`,
+		`PRAGMA user_version = 4`,
+	}
+	for _, s := range stmts {
+		if _, err := d.sql.Exec(s); err != nil {
+			t.Fatalf("force v4: %v", err)
+		}
+	}
+
+	// Capture `before` AFTER the fixture has set the DB back to v4.
+	preserved := []string{"evidence", "sources", "source_files", "chunks", "page_update_log"}
+	before := map[string]string{}
+	for _, tbl := range preserved {
+		var sqlText string
+		if err := d.sql.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, tbl).Scan(&sqlText); err != nil {
+			t.Fatalf("get sqlite_master.sql for %q: %v", tbl, err)
+		}
+		before[tbl] = sqlText
+	}
+	d.Close()
+
+	d2, err := Open(path)
+	if err != nil {
+		t.Fatalf("re-open: %v", err)
+	}
+	defer d2.Close()
+	for _, tbl := range preserved {
+		var after string
+		if err := d2.sql.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, tbl).Scan(&after); err != nil {
+			t.Fatalf("get sqlite_master.sql for %q post-upgrade: %v", tbl, err)
+		}
+		if after != before[tbl] {
+			t.Errorf("table %q schema changed across v4->v5 upgrade\nbefore: %s\nafter:  %s", tbl, before[tbl], after)
 		}
 	}
 }
