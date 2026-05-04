@@ -147,7 +147,7 @@ func MigratePage(
 	proposed.Tags = []string{"llmwiki", "ingest"}
 	proposed.Sources = distinctEvidenceSourceFiles(proposed.Evidence)
 	if proposed.Created.IsZero() {
-		if priorPage, err := ReadPage(page.Path); err == nil && !priorPage.Created.IsZero() {
+		if priorPage, err := ReadPageWithSchema(page.Path, activeSchema); err == nil && !priorPage.Created.IsZero() {
 			proposed.Created = priorPage.Created
 		} else {
 			proposed.Created = now

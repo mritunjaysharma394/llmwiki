@@ -587,3 +587,281 @@ func TestWritePage_BackwardsCompatShim_NoSchemaArg_UsesBundled(t *testing.T) {
 
 // reflect is used by Task 16's round-trip tests.
 var _ = reflect.DeepEqual
+
+// ---------- Sub-project 7 / Phase J Task 16 ----------
+//
+// ParsePageWithSchema reads back via the same canonical/declared map;
+// pre-v0.7 pages on disk fall back to canonical names; extra
+// frontmatter (declared but not in the canonical struct set) round-
+// trips through Page.ExtraFrontmatter.
+//
+// TRUST PROPERTY UNCHANGED. The canonical Page.Evidence struct field
+// is fixed; ParsePage maps the on-disk key (whatever the user named
+// it) back to Page.Evidence so the validator's check is name-agnostic.
+
+// TestParsePage_RenamedSchema_ReadsRenamedKeys: write a page under a
+// renamed schema (evidence → citations); parse with the same schema;
+// assert Page.Evidence is populated.
+func TestParsePage_RenamedSchema_ReadsRenamedKeys(t *testing.T) {
+	dir := t.TempDir()
+	sch := canonicalSchemaWithDeclared(t, map[string]string{"evidence": "citations"})
+	want := Page{
+		Title:       "Renamed",
+		Body:        "body\n",
+		ContentHash: "h",
+		UpdatedAt:   time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC),
+		Evidence: []Evidence{
+			{Quote: "q1", LineStart: 1, LineEnd: 1, SourceFilePath: "internal/db/db.go"},
+		},
+	}
+	if err := WritePageWithSchema(want, dir, sch); err != nil {
+		t.Fatalf("WritePageWithSchema: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "Renamed.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParsePageWithSchema(string(data), sch)
+	if err != nil {
+		t.Fatalf("ParsePageWithSchema: %v", err)
+	}
+	if len(got.Evidence) != 1 || got.Evidence[0].Quote != "q1" {
+		t.Errorf("Page.Evidence not populated from `citations:`; got %#v", got.Evidence)
+	}
+}
+
+// TestParsePage_PreV07Page_FallsBackToBundledNames: content with
+// canonical `evidence:` on disk; parse under a renamed schema; the
+// canonical-name fallback rule lets the parser still populate
+// Page.Evidence (pre-v0.7 pages stay readable under a renamed schema).
+func TestParsePage_PreV07Page_FallsBackToBundledNames(t *testing.T) {
+	sch := canonicalSchemaWithDeclared(t, map[string]string{"evidence": "citations"})
+	content := "---\n" +
+		"title: Pre v0.7\n" +
+		"updated_at: 2026-04-01T10:00:00Z\n" +
+		"content_hash: deadbeef\n" +
+		"source_ids: [1]\n" +
+		"evidence:\n" +
+		"  - quote: \"old quote\"\n" +
+		"    line_start: 3\n" +
+		"    line_end: 3\n" +
+		"    source_file: foo.go\n" +
+		"---\n\n" +
+		"body\n"
+	got, err := ParsePageWithSchema(content, sch)
+	if err != nil {
+		t.Fatalf("ParsePageWithSchema: %v", err)
+	}
+	if len(got.Evidence) != 1 || got.Evidence[0].Quote != "old quote" {
+		t.Errorf("pre-v0.7 evidence: must still populate Page.Evidence under renamed schema; got %#v", got.Evidence)
+	}
+}
+
+// TestParsePage_BothNamesPresent_PrefersDeclared: pathological case
+// from a botched migration — both `evidence:` and `citations:` on
+// disk. The plan says the declared name (citations) wins.
+func TestParsePage_BothNamesPresent_PrefersDeclared(t *testing.T) {
+	sch := canonicalSchemaWithDeclared(t, map[string]string{"evidence": "citations"})
+	content := "---\n" +
+		"title: Both\n" +
+		"updated_at: 2026-04-01T10:00:00Z\n" +
+		"content_hash: h\n" +
+		"source_ids: [1]\n" +
+		"evidence:\n" +
+		"  - quote: \"old canonical quote\"\n" +
+		"    line_start: 1\n" +
+		"    line_end: 1\n" +
+		"    source_file: foo.go\n" +
+		"citations:\n" +
+		"  - quote: \"declared-name quote\"\n" +
+		"    line_start: 5\n" +
+		"    line_end: 5\n" +
+		"    source_file: bar.go\n" +
+		"---\n\n" +
+		"body\n"
+	got, err := ParsePageWithSchema(content, sch)
+	if err != nil {
+		t.Fatalf("ParsePageWithSchema: %v", err)
+	}
+	if len(got.Evidence) == 0 {
+		t.Fatalf("no evidence parsed at all; got %#v", got)
+	}
+	// Plan: declared name wins. The canonical-only `evidence:` block is
+	// dropped; the `citations:` block is what lands on Page.Evidence.
+	if got.Evidence[0].Quote != "declared-name quote" {
+		t.Errorf("declared name should win; got Page.Evidence[0].Quote = %q", got.Evidence[0].Quote)
+	}
+	for _, e := range got.Evidence {
+		if e.Quote == "old canonical quote" {
+			t.Errorf("canonical-only block should be dropped when declared block is also present; got %#v", got.Evidence)
+		}
+	}
+}
+
+// TestParsePage_ExtraFrontmatterPassThrough_DeclaredButUnknown: schema
+// declares `priority` (extra field); content has `priority: high`;
+// Page.ExtraFrontmatter populated.
+func TestParsePage_ExtraFrontmatterPassThrough_DeclaredButUnknown(t *testing.T) {
+	sch := schema.Bundled()
+	sch.Ontology.Fields = append(sch.Ontology.Fields, schema.OntologyField{
+		CanonicalName: "priority",
+		DeclaredName:  "priority",
+		Type:          "string",
+		Description:   "user-declared extra",
+	})
+	content := "---\n" +
+		"title: Pri\n" +
+		"updated_at: 2026-04-01T10:00:00Z\n" +
+		"content_hash: h\n" +
+		"source_ids: [1]\n" +
+		"priority: high\n" +
+		"---\n\n" +
+		"body\n"
+	got, err := ParsePageWithSchema(content, sch)
+	if err != nil {
+		t.Fatalf("ParsePageWithSchema: %v", err)
+	}
+	if got.ExtraFrontmatter == nil {
+		t.Fatalf("ExtraFrontmatter is nil; got %#v", got)
+	}
+	if v := got.ExtraFrontmatter["priority"]; v != "high" {
+		t.Errorf("ExtraFrontmatter[\"priority\"] = %q, want %q", v, "high")
+	}
+}
+
+// TestParsePage_BackwardsCompatShim_NoSchemaArg_UsesBundled: legacy
+// ParsePage(content) delegates to ParsePageWithSchema(content,
+// schema.Bundled()); behaviour identical for canonical-named pages.
+func TestParsePage_BackwardsCompatShim_NoSchemaArg_UsesBundled(t *testing.T) {
+	content := "---\n" +
+		"title: Shim\n" +
+		"updated_at: 2026-04-01T10:00:00Z\n" +
+		"content_hash: h\n" +
+		"source_ids: [1]\n" +
+		"evidence:\n" +
+		"  - quote: \"q\"\n" +
+		"    line_start: 1\n" +
+		"    line_end: 1\n" +
+		"    source_file: foo.go\n" +
+		"---\n\n" +
+		"body\n"
+	a, errA := ParsePage(content)
+	if errA != nil {
+		t.Fatalf("ParsePage shim: %v", errA)
+	}
+	b, errB := ParsePageWithSchema(content, schema.Bundled())
+	if errB != nil {
+		t.Fatalf("ParsePageWithSchema: %v", errB)
+	}
+	if !reflect.DeepEqual(a, b) {
+		t.Errorf("ParsePage shim != ParsePageWithSchema(_, Bundled())\nshim: %#v\nschema-aware: %#v", a, b)
+	}
+}
+
+// TestRoundTrip_RenamedSchema: write with renamed schema, read back
+// with the same schema, assert structural equality.
+func TestRoundTrip_RenamedSchema(t *testing.T) {
+	dir := t.TempDir()
+	sch := canonicalSchemaWithDeclared(t, map[string]string{"evidence": "citations"})
+	want := Page{
+		Title:       "RoundTripRename",
+		Body:        "# Heading\n\nBody.\n",
+		Links:       []Link{{To: "Other", Type: "supports"}},
+		SourceIDs:   []int64{1, 2},
+		ContentHash: "h",
+		UpdatedAt:   time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC),
+		Evidence: []Evidence{
+			{Quote: "q1", LineStart: 1, LineEnd: 2, SourceFilePath: "internal/db/db.go"},
+		},
+		Tags:    []string{"llmwiki", "ingest"},
+		Sources: []string{"internal/db/db.go"},
+		Created: time.Date(2026, 5, 4, 0, 0, 0, 0, time.UTC),
+	}
+	if err := WritePageWithSchema(want, dir, sch); err != nil {
+		t.Fatalf("WritePageWithSchema: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "RoundTripRename.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParsePageWithSchema(string(data), sch)
+	if err != nil {
+		t.Fatalf("ParsePageWithSchema: %v", err)
+	}
+	if got.Title != want.Title {
+		t.Errorf("Title: got %q want %q", got.Title, want.Title)
+	}
+	if got.Body != want.Body {
+		t.Errorf("Body: got %q want %q", got.Body, want.Body)
+	}
+	if !reflect.DeepEqual(got.Evidence, want.Evidence) {
+		t.Errorf("Evidence: got %#v want %#v", got.Evidence, want.Evidence)
+	}
+	if !reflect.DeepEqual(got.Links, want.Links) {
+		t.Errorf("Links: got %#v want %#v", got.Links, want.Links)
+	}
+	if !reflect.DeepEqual(got.Tags, want.Tags) {
+		t.Errorf("Tags: got %#v want %#v", got.Tags, want.Tags)
+	}
+	if !reflect.DeepEqual(got.Sources, want.Sources) {
+		t.Errorf("Sources: got %#v want %#v", got.Sources, want.Sources)
+	}
+	if !got.Created.Equal(want.Created) {
+		t.Errorf("Created: got %v want %v", got.Created, want.Created)
+	}
+	if !got.UpdatedAt.Equal(want.UpdatedAt) {
+		t.Errorf("UpdatedAt: got %v want %v", got.UpdatedAt, want.UpdatedAt)
+	}
+}
+
+// TestRoundTrip_ExtraFrontmatter_ParseWritePreservesValues: round-trip
+// a Page with non-empty ExtraFrontmatter under a schema declaring
+// those fields; assert disk emission and re-parse preserve the values.
+func TestRoundTrip_ExtraFrontmatter_ParseWritePreservesValues(t *testing.T) {
+	dir := t.TempDir()
+	sch := schema.Bundled()
+	sch.Ontology.Fields = append(sch.Ontology.Fields,
+		schema.OntologyField{CanonicalName: "priority", DeclaredName: "priority", Type: "string"},
+		schema.OntologyField{CanonicalName: "owner", DeclaredName: "owner", Type: "string"},
+	)
+	want := Page{
+		Title:       "Extras",
+		Body:        "body\n",
+		ContentHash: "h",
+		UpdatedAt:   time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC),
+		Evidence: []Evidence{
+			{Quote: "q1", LineStart: 1, LineEnd: 1, SourceFilePath: "internal/db/db.go"},
+		},
+		ExtraFrontmatter: map[string]string{
+			"priority": "high",
+			"owner":    "alice",
+		},
+	}
+	if err := WritePageWithSchema(want, dir, sch); err != nil {
+		t.Fatalf("WritePageWithSchema: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "Extras.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	if !strings.Contains(s, "priority: high\n") {
+		t.Errorf("expected `priority: high` on disk; file:\n%s", s)
+	}
+	if !strings.Contains(s, "owner: alice\n") {
+		t.Errorf("expected `owner: alice` on disk; file:\n%s", s)
+	}
+	// Alphabetical order: owner before priority.
+	ownerIdx := strings.Index(s, "owner: alice")
+	priIdx := strings.Index(s, "priority: high")
+	if ownerIdx < 0 || priIdx < 0 || ownerIdx >= priIdx {
+		t.Errorf("ExtraFrontmatter must emit alphabetically (owner before priority); ownerIdx=%d priIdx=%d\n%s", ownerIdx, priIdx, s)
+	}
+	got, err := ParsePageWithSchema(s, sch)
+	if err != nil {
+		t.Fatalf("ParsePageWithSchema: %v", err)
+	}
+	if got.ExtraFrontmatter["priority"] != "high" || got.ExtraFrontmatter["owner"] != "alice" {
+		t.Errorf("ExtraFrontmatter round-trip lost values; got %#v", got.ExtraFrontmatter)
+	}
+}

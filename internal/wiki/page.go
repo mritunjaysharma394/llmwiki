@@ -52,6 +52,14 @@ type Page struct {
 	Tags    []string
 	Sources []string
 	Created time.Time
+	// Sub-project 7 / Phase J Task 16: extra frontmatter declared in
+	// the schema's `## Page ontology` (or simply present on disk) but
+	// not in the canonical struct set. Round-tripped on Read/Write
+	// under the schema-aware path. The validator does NOT check these
+	// values — they are pass-through, intended as an extension point
+	// for v0.8+'s "truly new structured fields with their own
+	// validation."
+	ExtraFrontmatter map[string]string
 }
 
 func HashContent(content string) string {
@@ -250,10 +258,22 @@ func WritePageWithSchema(p Page, wikiDir string, sch schema.Schema) error {
 		}
 	}
 
-	// Page.ExtraFrontmatter round-trip is added in Task 16 (paired with
-	// ParsePageWithSchema's pass-through). Task 15 only guarantees that
-	// declared-but-untyped fields are NOT fabricated on write — which is
-	// the natural behaviour of the canonical-field switch above.
+	// Page.ExtraFrontmatter round-trip (Task 16). Emit alphabetically
+	// after the canonical fields, before the closing `---`. We do NOT
+	// fabricate values for keys that aren't already in the map — values
+	// only land here when ParsePageWithSchema previously read them off
+	// disk. Alphabetical order is for stability (an unstable map-walk
+	// order would produce churn in `git diff` for unchanged pages).
+	if len(p.ExtraFrontmatter) > 0 {
+		keys := make([]string, 0, len(p.ExtraFrontmatter))
+		for k := range p.ExtraFrontmatter {
+			keys = append(keys, k)
+		}
+		sortStrings(keys)
+		for _, k := range keys {
+			sb.WriteString(fmt.Sprintf("%s: %s\n", k, p.ExtraFrontmatter[k]))
+		}
+	}
 
 	sb.WriteString("---\n\n")
 	sb.WriteString(p.Body)
@@ -268,7 +288,43 @@ func ReadPage(path string) (Page, error) {
 	return ParsePage(string(data))
 }
 
+// ReadPageWithSchema is the schema-aware companion to ReadPage; it
+// delegates to ParsePageWithSchema so production callers that have
+// the active schema in scope can read pages written under renamed
+// ontologies without losing data into ExtraFrontmatter.
+func ReadPageWithSchema(path string, sch schema.Schema) (Page, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Page{}, err
+	}
+	return ParsePageWithSchema(string(data), sch)
+}
+
+// ParsePage is the legacy backwards-compat shim. Pre-v0.7 callers see
+// no behaviour change: it delegates to ParsePageWithSchema with
+// schema.Bundled() so canonical-named pages still parse identically.
 func ParsePage(content string) (Page, error) {
+	return ParsePageWithSchema(content, schema.Bundled())
+}
+
+// ParsePageWithSchema parses page content using the schema's declared
+// field names; falls back to canonical names for keys the schema didn't
+// rename (so pre-v0.7 pages on disk still parse under a renamed
+// schema). Keys not in the canonical struct set land in
+// Page.ExtraFrontmatter for round-tripping.
+//
+// Pathological case: when both the renamed key (declared) and its
+// canonical fallback are present in the same file (botched
+// migration), the declared name wins — the canonical-name block is
+// dropped on the floor for that canonical field. The Phase H
+// schema_drift / page_update_log surfaces will surface this condition
+// so the user can reconcile.
+//
+// TRUST PROPERTY UNCHANGED. The validator reads p.Evidence
+// unconditionally, regardless of whether the user named it
+// "evidence", "citations", or "quotes" on disk. The substring-match
+// check is bundled and unreachable from the schema.
+func ParsePageWithSchema(content string, sch schema.Schema) (Page, error) {
 	var p Page
 	if !strings.HasPrefix(content, "---\n") {
 		p.Body = content
@@ -285,7 +341,74 @@ func ParsePage(content string) (Page, error) {
 	frontmatter := rest[:end]
 	p.Body = strings.TrimPrefix(rest[end+5:], "\n")
 
+	// Build the bidirectional resolver. declared → canonical AND
+	// canonical → canonical. The second binding is the pre-v0.7
+	// fallback: a page on disk written under bundled canonical names
+	// still parses correctly when the active schema renamed those
+	// fields. When both keys are present in the same file, the
+	// declared-name resolver wins (its mapping is added second so its
+	// presence in the file is preferred — but more importantly, we
+	// track which canonical fields we've already seen via the declared
+	// key and skip canonical-name matches for those).
+	canonicalFor := make(map[string]string, 2*len(sch.Ontology.Fields))
+	declaredFor := make(map[string]string, len(sch.Ontology.Fields))
+	for _, f := range sch.Ontology.Fields {
+		declaredFor[f.CanonicalName] = f.DeclaredName
+		canonicalFor[f.DeclaredName] = f.CanonicalName
+		canonicalFor[f.CanonicalName] = f.CanonicalName
+	}
+
+	// declaredKeysPresent[canonical] = true once we've hit the user's
+	// declared key for that canonical field. Used to suppress the
+	// canonical-name fallback when both are present (declared wins).
+	declaredKeysPresent := map[string]bool{}
+	for _, f := range sch.Ontology.Fields {
+		if f.DeclaredName != f.CanonicalName {
+			// Pre-scan: if the declared key is present in the file,
+			// mark the canonical as "declared wins" so a later
+			// canonical-named line doesn't overwrite the declared
+			// value.
+			declaredPrefix := f.DeclaredName + ":"
+			for _, line := range strings.Split(frontmatter, "\n") {
+				if strings.HasPrefix(line, declaredPrefix) {
+					declaredKeysPresent[f.CanonicalName] = true
+					break
+				}
+			}
+		}
+	}
+
+	// resolveKey returns the canonical name for a frontmatter key, or
+	// "" if the key isn't in our canonical-or-declared set. The
+	// declared-wins suppression: a canonical-name line is skipped when
+	// the declared name for that canonical also appears in the file.
+	// When the key isn't in the schema map at all, fall back to the
+	// bundled canonical name (so a page on disk with `evidence:` still
+	// parses under a schema that didn't declare that canonical at all).
+	resolveKey := func(key string) string {
+		c, ok := canonicalFor[key]
+		if !ok {
+			// Fallback to the bundled canonical set so pre-v0.7 pages
+			// parse even if the active schema is partial / synthetic.
+			if canonicalSchemaFields[key] {
+				return key
+			}
+			return ""
+		}
+		// If this is a canonical-name match AND the declared name
+		// (different from canonical) also appears in the file, skip
+		// this line — declared wins.
+		decl := declaredFor[c]
+		if key == c && decl != "" && decl != c && declaredKeysPresent[c] {
+			return ""
+		}
+		return c
+	}
+
 	var inLinks, inEvidence bool
+	// curBlockCanonical is the canonical name of the multi-line block
+	// (links / evidence / extra-frontmatter) we are currently inside.
+	// It controls how subsequent indented lines are interpreted.
 	var curEv Evidence
 	flushEv := func() {
 		if curEv.Quote != "" {
@@ -294,27 +417,81 @@ func ParsePage(content string) (Page, error) {
 		}
 	}
 	for _, line := range strings.Split(frontmatter, "\n") {
-		switch {
-		case strings.HasPrefix(line, "title: "):
-			p.Title = strings.TrimSpace(line[7:])
+		// Identify scalar or block-start lines: `<key>:` or `<key>: <value>`.
+		// Indented continuation lines are handled separately below.
+		if !strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "    ") {
+			// Top-level frontmatter key.
+			colonIdx := strings.Index(line, ":")
+			if colonIdx < 0 {
+				continue
+			}
+			key := line[:colonIdx]
+			value := strings.TrimSpace(line[colonIdx+1:])
+			// Special-case the date-only `updated:` twin. It's a
+			// write-only emission alongside `updated_at:` — the source
+			// of truth is `updated_at`. We silently drop it on parse
+			// so it doesn't end up in ExtraFrontmatter and round-trip
+			// as a duplicate.
+			if key == "updated" {
+				inLinks, inEvidence = false, false
+				continue
+			}
+			canonical := resolveKey(key)
+			// A non-canonical key (canonical == "" OR canonical maps
+			// to itself but isn't in canonicalSchemaFields, e.g. a
+			// user-declared `priority`) is an ExtraFrontmatter scalar.
+			if canonical == "" || !canonicalSchemaFields[canonical] {
+				inLinks, inEvidence = false, false
+				if canonical == "" {
+					// Suppressed by declared-wins (declared key is
+					// also present somewhere in the file). Drop on
+					// the floor.
+					decl := declaredFor[canonicalFor[key]]
+					if key == canonicalFor[key] && decl != "" && decl != key {
+						continue
+					}
+				}
+				if value != "" {
+					if p.ExtraFrontmatter == nil {
+						p.ExtraFrontmatter = map[string]string{}
+					}
+					p.ExtraFrontmatter[key] = value
+				}
+				continue
+			}
+			// We have a canonical match. Reset block flags and dispatch.
 			inLinks, inEvidence = false, false
-		case strings.HasPrefix(line, "updated_at: "):
-			p.UpdatedAt, _ = time.Parse(time.RFC3339, strings.TrimSpace(line[12:]))
-		case strings.HasPrefix(line, "content_hash: "):
-			p.ContentHash = strings.TrimSpace(line[14:])
-		case strings.HasPrefix(line, "source_ids: "):
-			p.SourceIDs = parseIntArray(strings.TrimSpace(line[12:]))
-		case strings.HasPrefix(line, "tags: "):
-			p.Tags = parseStringArray(strings.TrimSpace(line[6:]))
-		case strings.HasPrefix(line, "sources: "):
-			p.Sources = parseStringArray(strings.TrimSpace(line[9:]))
-		case strings.HasPrefix(line, "created: "):
-			p.Created, _ = time.Parse("2006-01-02", strings.TrimSpace(line[9:]))
-		case strings.HasPrefix(line, "links:"):
-			inLinks, inEvidence = true, false
-		case strings.HasPrefix(line, "evidence:"):
-			flushEv()
-			inLinks, inEvidence = false, true
+			switch canonical {
+			case "title":
+				p.Title = value
+			case "updated_at":
+				p.UpdatedAt, _ = time.Parse(time.RFC3339, value)
+			case "content_hash":
+				p.ContentHash = value
+			case "source_ids":
+				p.SourceIDs = parseIntArray(value)
+			case "tags":
+				p.Tags = parseStringArray(value)
+			case "sources":
+				p.Sources = parseStringArray(value)
+			case "created":
+				p.Created, _ = time.Parse("2006-01-02", value)
+			case "links":
+				// Reset Links so a duplicate canonical block doesn't
+				// append to an earlier one (declared-wins suppression
+				// already filters the canonical block when both
+				// declared+canonical appear).
+				p.Links = nil
+				inLinks = true
+			case "evidence":
+				flushEv()
+				p.Evidence = nil
+				inEvidence = true
+			}
+			continue
+		}
+		// Indented continuation line.
+		switch {
 		case inLinks && strings.HasPrefix(line, "  - to: "):
 			p.Links = append(p.Links, Link{To: strings.TrimSpace(line[8:])})
 		case inLinks && strings.HasPrefix(line, "    type: ") && len(p.Links) > 0:
@@ -337,6 +514,29 @@ func ParsePage(content string) (Page, error) {
 	}
 	flushEv()
 	return p, nil
+}
+
+// canonicalSchemaFields is the fixed canonical name set known to the
+// page parser/writer. Mirrors canonicalOntologyFields in
+// internal/schema/parser.go. Used by ParsePageWithSchema to decide
+// whether an unresolved frontmatter key is "extra" (lands in
+// ExtraFrontmatter) or "canonical-but-suppressed-by-declared-wins"
+// (silently dropped).
+var canonicalSchemaFields = map[string]bool{
+	"title": true, "body": true, "evidence": true, "links": true,
+	"sources": true, "tags": true, "created": true, "updated_at": true,
+	"content_hash": true, "source_ids": true,
+}
+
+// sortStrings is a small in-place insertion sort for string slices —
+// avoids pulling in `sort` for the single use site here (the
+// alphabetical ExtraFrontmatter emission in WritePageWithSchema).
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j-1] > s[j]; j-- {
+			s[j-1], s[j] = s[j], s[j-1]
+		}
+	}
 }
 
 // yamlEscapeScalar quotes the string only when it contains characters that

@@ -362,7 +362,7 @@ func finishUpdateCandidate(
 	if updated.Created.IsZero() {
 		// Preserve the page's original `created:` if we can fish it out
 		// of the on-disk file; otherwise stamp now.
-		if priorPage, err := ReadPage(cand.Path); err == nil && !priorPage.Created.IsZero() {
+		if priorPage, err := ReadPageWithSchema(cand.Path, opts.Schema); err == nil && !priorPage.Created.IsZero() {
 			updated.Created = priorPage.Created
 		} else {
 			updated.Created = now
