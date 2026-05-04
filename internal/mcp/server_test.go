@@ -875,3 +875,38 @@ func TestIngest_ReturnShapeIncludesRetroLinkedPages(t *testing.T) {
 		t.Errorf("response missing retro_linked_pages key (raw=%s)", text)
 	}
 }
+
+// TestIngest_ReturnShapeIncludesContradictionsFlagged drives mcp.ingest
+// via the fakeIngestClient and asserts the response payload includes a
+// `contradictions_flagged` integer key. Phase E extension of the
+// ingest handler return shape — informational counter populated by
+// wiki.DetectIngestContradictions during IngestSource.
+func TestIngest_ReturnShapeIncludesContradictionsFlagged(t *testing.T) {
+	deps, cleanup := newTestDeps(t, &fakeIngestClient{})
+	defer cleanup()
+	if err := os.MkdirAll(deps.Cfg.WikiDir, 0755); err != nil {
+		t.Fatalf("mkdir wiki: %v", err)
+	}
+
+	tempDir := filepath.Dir(deps.Cfg.WikiDir)
+	srcPath := filepath.Join(tempDir, "ingest-src.md")
+	if err := os.WriteFile(srcPath, []byte("Goroutines are lightweight threads.\n"), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	srv := NewServer(deps)
+	c, done := connect(t, srv)
+	defer done()
+
+	res, text := callTool(t, c, "ingest", map[string]any{"source": srcPath})
+	if res.IsError {
+		t.Fatalf("ingest returned error: %s", text)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("unmarshal: %v\nraw=%s", err, text)
+	}
+	if _, ok := got["contradictions_flagged"]; !ok {
+		t.Errorf("response missing contradictions_flagged key (raw=%s)", text)
+	}
+}

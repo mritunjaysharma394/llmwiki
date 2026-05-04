@@ -447,6 +447,39 @@ func IngestSource(ctx context.Context, cfg IngestSourceConfig, database *db.DB, 
 		}
 	}
 
+	// Phase E (sub-project 6a): contradiction-on-ingest. Builds the
+	// (new pages, existing-page candidate) pairs via FTS+title overlap,
+	// runs one structured LLM call per pair, filters hallucinated
+	// quotes, appends matches to <wikiDir>/contradictions.md, prints
+	// an inline summary. LLM errors log WARN and are swallowed —
+	// ingest writes already happened above so a contradiction failure
+	// cannot revoke them.
+	existingPageRecs, _ := database.AllPages()
+	newSet := map[string]bool{}
+	for _, p := range allPages {
+		newSet[p.Title] = true
+	}
+	existingNonNew := existingPageRecs[:0]
+	for _, p := range existingPageRecs {
+		if !newSet[p.Title] {
+			existingNonNew = append(existingNonNew, p)
+		}
+	}
+	contras, _ := DetectIngestContradictions(ctx, client, allPages, existingNonNew, DefaultContradictionCandidateLimit, database)
+	if len(contras) > 0 {
+		out.ContradictionsFlagged = len(contras)
+		logf("\n!! %d contradiction(s) flagged against the new pages:\n", len(contras))
+		for _, c := range contras {
+			logf("   - new page %q claims:\n     > %q\n     conflicts with existing page [[%s]]:\n     > %q\n     both quotes are validated against their own sources; resolve manually.\n",
+				c.NewPageTitle, c.NewPageQuote, c.ExistingTitle, c.ExistingQuote)
+		}
+		if err := AppendContradictions(cfg.WikiDir, contras, source, time.Now().UTC()); err != nil {
+			fmt.Fprintf(os.Stderr, "  WARN appending to contradictions.md: %v\n", err)
+		} else {
+			logf("logged to: %s/contradictions.md\n", cfg.WikiDir)
+		}
+	}
+
 	allPageRecs, err := database.AllPages()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  WARN reading pages for index: %v\n", err)

@@ -785,13 +785,13 @@ func ingestHandler(d Deps) mcpsrv.ToolHandlerFunc {
 			return errorResult("ingest_failed", err.Error(), nil), nil
 		}
 		return jsonResult(map[string]any{
-			"source":             res.Source,
-			"pages_written":      res.PagesWritten,
-			"evidence_quotes":    res.EvidenceQuotes,
-			"dropped_pages":      res.DroppedPages,
-			"skipped":            res.Skipped,
-			"retro_linked_pages": res.RetroLinkedPages,
-			// contradictions_flagged added in Phase E
+			"source":                 res.Source,
+			"pages_written":          res.PagesWritten,
+			"evidence_quotes":        res.EvidenceQuotes,
+			"dropped_pages":          res.DroppedPages,
+			"skipped":                res.Skipped,
+			"retro_linked_pages":     res.RetroLinkedPages,
+			"contradictions_flagged": res.ContradictionsFlagged,
 		})
 	}
 }
