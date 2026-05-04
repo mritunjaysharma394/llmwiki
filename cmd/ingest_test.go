@@ -357,6 +357,63 @@ db_path = ".llmwiki/wiki.db"
 	}
 }
 
+// TestIngestOpenAICompat exercises the full ingest pipeline through the
+// OpenAI-compatible client (targeting OpenRouter's free tier as the canonical
+// cheap-provider endpoint), using a recorded cassette for replay. Same
+// validator contract as TestIngestGemini: every evidence quote must
+// substring-match the source content.
+//
+// The plan originally called for hand-editing one recorded chunk to drop
+// tool_calls and wrap JSON in prose, forcing the CompleteStructured
+// JSON-extraction fallback. That can't be done at the cassette layer in
+// practice — the cassette captures the *parsed* map[string]any output of
+// CompleteStructured, after OpenAICompatClient has already either parsed
+// tool_calls, fallen back to JSON-extraction, or errored out. The fallback
+// path is exercised directly by the unit test
+// TestOpenAICompatCompleteStructured_FallbackJSONExtraction in
+// internal/llm/openai_compat_test.go (Phase A); this cassette test verifies
+// the end-to-end happy path through the OpenAI-compat wiring.
+func TestIngestOpenAICompat(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping cassette test in -short mode")
+	}
+	cassette := filepath.Join(realCassetteDir(t), "TestIngestOpenAICompat__001.json")
+	if _, err := os.Stat(cassette); os.IsNotExist(err) {
+		t.Skip("cassette not recorded; run with LLMWIKI_RECORD=1 OPENROUTER_API_KEY=... to record")
+	}
+	t.Setenv("LLMWIKI_CASSETTE", "TestIngestOpenAICompat")
+	t.Setenv("OPENROUTER_API_KEY", "test-key-for-replay")
+
+	source := "Goroutines are lightweight threads of execution managed by the Go runtime.\nThe `go` keyword starts a goroutine.\nGoroutines communicate via channels.\n"
+	configBody := `[llm]
+provider = "openai-compatible"
+model = "meta-llama-3.1-8b-instruct:free"
+
+[wiki]
+wiki_dir = ".llmwiki/wiki"
+raw_dir = ".llmwiki/raw"
+db_path = ".llmwiki/wiki.db"
+
+[providers.openai_compat]
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+`
+	pages := runIngestThroughLoadConfig(t, source, configBody)
+	if len(pages) == 0 {
+		t.Fatal("got 0 pages")
+	}
+	for _, p := range pages {
+		if len(p.Evidence) == 0 {
+			t.Errorf("page %q has no evidence", p.Title)
+		}
+		for _, e := range p.Evidence {
+			if !strings.Contains(source, e.Quote) {
+				t.Errorf("page %q evidence quote not in source: %q", p.Title, e.Quote)
+			}
+		}
+	}
+}
+
 // sanity assertion: paths in `gone` are returned in arbitrary order; tests
 // shouldn't depend on map iteration order.
 func TestPartitionGoneSortable(t *testing.T) {
