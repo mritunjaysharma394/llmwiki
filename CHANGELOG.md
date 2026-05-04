@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.2.0] — 2026-05-04
+## [0.5.0-rc.1] — 2026-05-04
 
 ### Added
 - `llmwiki promote <answer-file-or-slug>` — new command that lifts a
@@ -38,19 +38,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `retro_linked_pages: int`.
 
 ### Changed
-- `internal/mcp` `serverVersion` bumped to `1.2.0`.
+- `internal/mcp` `serverVersion` bumped to `0.5.0-rc.1`.
 
 ### Notes
 - **No schema migration.** `PRAGMA user_version` stays at 3.
 - The existing `lint` command's whole-wiki contradiction batcher is
   unchanged. Live contradiction-on-ingest is a sibling, not a
   replacement.
-- v1.3 (sub-project 6b) will add the cross-page page-update pass
+- v0.6 (sub-project 6b) will add the cross-page page-update pass
   under a default-off `--update-existing` flag, plus further
   `mcp.ingest` return-shape extensions (`pages_updated`,
-  `pages_update_failed`). Out of scope for v1.2.
+  `pages_update_failed`). Out of scope for v0.5.
 
-## [1.1.0] — 2026-05-04
+## [0.4.0] — 2026-05-04
 
 ### Added
 - `llmwiki mcp` — MCP stdio server exposing six tools (`ingest`, `ask`,
@@ -82,7 +82,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cheap-provider wikis end up sparser than Haiku wikis but never less
   honest — the validator drops unverified quotes on every provider equally.
 
-## [1.0.0-rc.1] — 2026-05-04
+## [0.3.0] — 2026-05-04
 
 ### Added
 
@@ -120,7 +120,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `userAgentVersion` constant in `internal/ingest/url.go` is replaced by
   `version.Version` from `internal/version`. Sites filtering on the literal
-  `"llmwiki/0.1"` substring will see `"llmwiki/1.0.0-rc.1"` after this release.
+  `"llmwiki/0.1"` substring will see `"llmwiki/0.3.0"` after this release.
 
 ## [0.2.0] — 2026-05-03 (sub-project 3)
 
@@ -150,9 +150,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   database.
 - Cassette-based LLM client for record/replay testing.
 
-[Unreleased]: https://github.com/mritunjaysharma394/llmwiki/compare/v1.2.0...HEAD
-[1.2.0]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v1.2.0
-[1.1.0]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v1.1.0
-[1.0.0-rc.1]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v1.0.0-rc.1
+[Unreleased]: https://github.com/mritunjaysharma394/llmwiki/compare/v0.5.0-rc.1...HEAD
+[0.5.0-rc.1]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v0.5.0-rc.1
+[0.4.0]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v0.4.0
+[0.3.0]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v0.3.0
 [0.2.0]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v0.2.0
 [0.1.0]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v0.1.0

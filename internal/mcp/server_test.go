@@ -983,8 +983,8 @@ func TestPromoteAnswer_ToolRegistered(t *testing.T) {
 		sort.Strings(got)
 		t.Fatalf("promote_answer not registered; tools=%v", got)
 	}
-	if serverVersion != "1.2.0" {
-		t.Errorf("serverVersion = %q, want %q", serverVersion, "1.2.0")
+	if serverVersion != "0.5.0-rc.1" {
+		t.Errorf("serverVersion = %q, want %q", serverVersion, "0.5.0-rc.1")
 	}
 }
 

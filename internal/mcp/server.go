@@ -34,7 +34,7 @@ type Deps struct {
 
 const (
 	serverName    = "llmwiki"
-	serverVersion = "1.2.0" // bumped from 1.1.0 for sub-project 6a (promote_answer + return-shape extensions)
+	serverVersion = "0.5.0-rc.1" // bumped from 0.4.0 for sub-project 6a (promote_answer + return-shape extensions)
 )
 
 // NewServer registers all seven tools — four read-only (list_pages, read_page,

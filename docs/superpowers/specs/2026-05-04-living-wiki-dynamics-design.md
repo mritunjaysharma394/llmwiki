@@ -4,6 +4,8 @@
 **Date:** 2026-05-04
 **Author:** Mritunjay Sharma (with Claude)
 
+> **Version-numbering note (added 2026-05-04 after the renumber):** this design was authored when the project's release line was v1.x. The line has since been renumbered to pre-1.0. Where this spec says **v1.2** (sub-project 6a), read **v0.5**; **v1.3** (sub-project 6b, still-unshipped) → **v0.6**; **v1.1** → **v0.4**; **v1.0** → **v0.3**. The project is honestly pre-1.0; the renumber reflects that.
+
 ## Context
 
 Sub-projects 1, 3, 4, and 5 shipped. As of `e2810f5` (`v1.1.0-rc.1`), `llmwiki` is a write-once accumulator: `llmwiki ingest` reads a source, the LLM proposes pages, `wiki.ValidateAndAttachEvidence` (in `internal/wiki/ops.go`) drops anything whose evidence quotes don't byte-exactly substring-match the named source file, and the survivors land on disk and in `wiki.db`. `[[wikilinks]]` are emitted at write time over the union of (existing titles, this batch's titles) by `wiki.RewriteBareReferencesAsWikilinks` (`internal/wiki/obsidian.go`); `index.md` and `log.md` are regenerated/appended at the end of each `ingest` run; the MCP server (`internal/mcp/handlers.go`) exposes the same flow over `mcp.ingest` and `mcp.write_page`. Cheap providers (Gemini Flash, OpenRouter free tier, Ollama) work because the validator's "drop quote, drop page" behaviour is provider-agnostic.

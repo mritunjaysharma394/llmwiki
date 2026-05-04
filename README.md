@@ -226,7 +226,7 @@ llmwiki ingest https://example.com/whitepaper.pdf
 ```
 
 Text PDFs are extracted page-by-page. Scanned/OCR-only pages are detected and
-skipped with a warning — OCR is not supported in v1.0.
+skipped with a warning — OCR is not supported in v0.3.
 
 ### RSS/Atom/JSON Feed
 
@@ -290,14 +290,14 @@ across the matrix:
 > Switching to a cheaper model produces a sparser wiki, never a more wrong
 > one.
 
-v1.2's three new behaviours (promote, retro-link, contradictions) all
+v0.5's three new behaviours (promote, retro-link, contradictions) all
 preserve the validator: every page reaching disk has at least one evidence
 quote that substring-matches its source — `promote` defensively re-validates
 because source files may have changed since the ask.
 
 ## Living Wiki
 
-Three additive behaviours layered on v1.1 that keep the wiki current as you
+Three additive behaviours layered on v0.4 that keep the wiki current as you
 use it. None of them weaken the trust property; all of them are cheap.
 
 ### Promote a saved answer into a permanent page
@@ -382,7 +382,7 @@ connections immediately.
 Sub-project 6b adds a cross-page page-update pass under a default-off
 `--update-existing` flag — when a new source updates earlier pages, those
 pages get their bodies refined under the same validator. Out of scope for
-v1.2.
+v0.5.
 
 ## Privacy
 

@@ -1,4 +1,6 @@
-# Sub-project 6a — Living Wiki Dynamics (v1.2) — Implementation Plan
+# Sub-project 6a — Living Wiki Dynamics (v0.5) — Implementation Plan
+
+> **Version-numbering note (added 2026-05-04 after the renumber):** this document was authored when the project's release line was v1.x. The line has since been renumbered to pre-1.0. Where this plan says **v1.2**, read **v0.5**; **v1.1** → **v0.4**; **v1.0** → **v0.3**; **v1.3** (the still-unshipped 6b release) → **v0.6**. The project is honestly pre-1.0; the renumber is the source-of-truth update.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

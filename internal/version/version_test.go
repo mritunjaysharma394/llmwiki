@@ -10,9 +10,9 @@ func TestFormatAllSet(t *testing.T) {
 	savedC := Commit
 	savedD := BuildDate
 	defer func() { Version, Commit, BuildDate = saved, savedC, savedD }()
-	Version, Commit, BuildDate = "1.0.0-rc.1", "abc1234", "2026-05-04"
+	Version, Commit, BuildDate = "0.5.0-rc.1", "abc1234", "2026-05-04"
 	got := Format()
-	for _, want := range []string{"llmwiki", "1.0.0-rc.1", "abc1234", "2026-05-04"} {
+	for _, want := range []string{"llmwiki", "0.5.0-rc.1", "abc1234", "2026-05-04"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Format() = %q, missing %q", got, want)
 		}
@@ -36,11 +36,11 @@ func TestFormatPartial(t *testing.T) {
 	savedC := Commit
 	savedD := BuildDate
 	defer func() { Version, Commit, BuildDate = saved, savedC, savedD }()
-	Version = "1.0.0"
+	Version = "0.5.0"
 	Commit = "(devel)"
 	BuildDate = "(devel)"
 	got := Format()
-	if !strings.Contains(got, "1.0.0") {
-		t.Errorf("Format() = %q, want substring 1.0.0", got)
+	if !strings.Contains(got, "0.5.0") {
+		t.Errorf("Format() = %q, want substring 0.5.0", got)
 	}
 }

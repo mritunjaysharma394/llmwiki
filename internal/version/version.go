@@ -16,7 +16,7 @@ var (
 )
 
 // Format returns the canonical one-line version string, e.g.
-// "llmwiki 1.0.0-rc.1 (commit abc1234, built 2026-05-04, go1.26.2)".
+// "llmwiki 0.5.0-rc.1 (commit abc1234, built 2026-05-04, go1.26.2)".
 // For development builds it collapses to "llmwiki (devel)".
 func Format() string {
 	if Version == "(devel)" && Commit == "(devel)" && BuildDate == "(devel)" {
