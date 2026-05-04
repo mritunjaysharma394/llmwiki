@@ -53,11 +53,45 @@ type IngestConfig struct {
 	SitemapMaxPages       int     `toml:"sitemap_max_pages"`
 }
 
+// ProvidersConfig groups per-provider knobs that don't belong on the catch-all
+// LLMConfig. Pre-v1.1 configs without a [providers] block decode into a
+// zero-valued ProvidersConfig; applyProviderDefaults fills the blanks silently
+// the same way applyIngestDefaults does for [ingest].
+type ProvidersConfig struct {
+	OpenAICompat OpenAICompatProviderConfig `toml:"openai_compat"`
+	Gemini       GeminiProviderConfig       `toml:"gemini"`
+	Anthropic    AnthropicProviderConfig    `toml:"anthropic"`
+	Ollama       OllamaProviderConfig       `toml:"ollama"`
+}
+
+// OpenAICompatProviderConfig captures the three knobs an operator needs to
+// point the OpenAI-compatible client at any of the five supported endpoints
+// (OpenRouter, Groq, Together, Cerebras, Mistral La Plateforme).
+type OpenAICompatProviderConfig struct {
+	BaseURL      string `toml:"base_url"`
+	APIKeyEnv    string `toml:"api_key_env"`
+	DefaultModel string `toml:"default_model"`
+}
+
+type GeminiProviderConfig struct {
+	DefaultModel string `toml:"default_model"`
+}
+
+type AnthropicProviderConfig struct {
+	DefaultModel string `toml:"default_model"`
+}
+
+type OllamaProviderConfig struct {
+	DefaultModel string `toml:"default_model"`
+	URL          string `toml:"url"`
+}
+
 type Config struct {
-	LLM    LLMConfig    `toml:"llm"`
-	Wiki   WikiConfig   `toml:"wiki"`
-	Ask    AskConfig    `toml:"ask"`
-	Ingest IngestConfig `toml:"ingest"`
+	LLM       LLMConfig       `toml:"llm"`
+	Wiki      WikiConfig      `toml:"wiki"`
+	Ask       AskConfig       `toml:"ask"`
+	Ingest    IngestConfig    `toml:"ingest"`
+	Providers ProvidersConfig `toml:"providers"`
 }
 
 // RespectGitignoreOrDefault returns the configured value, defaulting to true
@@ -115,8 +149,9 @@ func loadConfig() error {
 	if overrideModel != "" {
 		cfg.LLM.Model = overrideModel
 	}
+	applyProviderDefaults(cfg)
 	if cfg.LLM.OllamaURL == "" {
-		cfg.LLM.OllamaURL = "http://localhost:11434"
+		cfg.LLM.OllamaURL = cfg.Providers.Ollama.URL
 	}
 	applyIngestDefaults(&cfg.Ingest)
 	var err error
@@ -127,15 +162,48 @@ func loadConfig() error {
 			"if the schema is newer than this binary, downgrade is not supported; back up .llmwiki/wiki.db and re-init")
 	}
 	switch cfg.LLM.Provider {
+	case "gemini":
+		if os.Getenv("GEMINI_API_KEY") == "" {
+			return cliutil.Wrap(
+				"GEMINI_API_KEY is not set",
+				nil,
+				"get a free key at https://aistudio.google.com/apikey, then export GEMINI_API_KEY=...; or use --provider anthropic / openai-compatible / ollama",
+			)
+		}
+		llmClient = llm.NewGeminiClient(cfg.LLM.Model)
 	case "anthropic", "":
 		if os.Getenv("ANTHROPIC_API_KEY") == "" {
 			return cliutil.Wrap(
 				"ANTHROPIC_API_KEY is not set",
 				nil,
-				"export ANTHROPIC_API_KEY=sk-ant-... (get one at https://console.anthropic.com/settings/keys), or use --provider ollama",
+				"export ANTHROPIC_API_KEY=sk-ant-... (get one at https://console.anthropic.com/settings/keys), or use --provider gemini / ollama",
 			)
 		}
 		llmClient = llm.NewAnthropicClient(cfg.LLM.Model)
+	case "openai-compatible":
+		keyEnv := cfg.Providers.OpenAICompat.APIKeyEnv
+		if keyEnv == "" {
+			keyEnv = "OPENAI_COMPAT_API_KEY"
+		}
+		if os.Getenv(keyEnv) == "" {
+			return cliutil.Wrap(
+				fmt.Sprintf("%s is not set", keyEnv),
+				nil,
+				"set the env var named in [providers.openai_compat].api_key_env (default OPENAI_COMPAT_API_KEY), or use --provider gemini",
+			)
+		}
+		if cfg.Providers.OpenAICompat.BaseURL == "" {
+			return cliutil.Wrap(
+				"[providers.openai_compat].base_url is empty",
+				nil,
+				"set base_url to e.g. https://openrouter.ai/api/v1, https://api.groq.com/openai/v1, https://api.together.xyz/v1, https://api.cerebras.ai/v1, or https://api.mistral.ai/v1",
+			)
+		}
+		llmClient = llm.NewOpenAICompatClient(
+			cfg.Providers.OpenAICompat.BaseURL,
+			os.Getenv(keyEnv),
+			cfg.LLM.Model,
+		)
 	case "ollama":
 		llmClient = llm.NewOllamaClient(cfg.LLM.Model, cfg.LLM.OllamaURL)
 	default:
@@ -146,6 +214,45 @@ func loadConfig() error {
 		llmClient = llm.NewCassetteClient(llmClient, dir, name, llm.ModeReplay)
 	}
 	return nil
+}
+
+// applyProviderDefaults fills zero-valued ProvidersConfig fields and resolves
+// cfg.LLM.Model from the active provider's default_model when the user left
+// model empty after both flag overrides and TOML decoding. Pre-v1.1 configs
+// without a [providers] block decode into a zero struct; we silently apply the
+// defaults the v1.1 init template would have written, the same pattern
+// applyIngestDefaults uses for [ingest].
+func applyProviderDefaults(cfg *Config) {
+	if cfg.Providers.Gemini.DefaultModel == "" {
+		cfg.Providers.Gemini.DefaultModel = "gemini-2.0-flash"
+	}
+	if cfg.Providers.Anthropic.DefaultModel == "" {
+		cfg.Providers.Anthropic.DefaultModel = "claude-haiku-4-5"
+	}
+	if cfg.Providers.Ollama.DefaultModel == "" {
+		cfg.Providers.Ollama.DefaultModel = "llama3.2"
+	}
+	if cfg.Providers.Ollama.URL == "" {
+		cfg.Providers.Ollama.URL = "http://localhost:11434"
+	}
+	if cfg.Providers.OpenAICompat.APIKeyEnv == "" {
+		cfg.Providers.OpenAICompat.APIKeyEnv = "OPENAI_COMPAT_API_KEY"
+	}
+	// Resolve missing model from the active provider's default. The user's
+	// --model flag and the [llm].model field win; default_model only fills the
+	// gap. open question 4 in the plan resolves this precedence explicitly.
+	if cfg.LLM.Model == "" {
+		switch cfg.LLM.Provider {
+		case "gemini":
+			cfg.LLM.Model = cfg.Providers.Gemini.DefaultModel
+		case "anthropic", "":
+			cfg.LLM.Model = cfg.Providers.Anthropic.DefaultModel
+		case "ollama":
+			cfg.LLM.Model = cfg.Providers.Ollama.DefaultModel
+		case "openai-compatible":
+			cfg.LLM.Model = cfg.Providers.OpenAICompat.DefaultModel
+		}
+	}
 }
 
 // applyIngestDefaults fills zero-valued IngestConfig fields with their default
@@ -189,7 +296,7 @@ func init() {
 	rootCmd.SilenceErrors = true
 	rootCmd.SilenceUsage = true
 	rootCmd.SetVersionTemplate("{{.Version}}\n")
-	rootCmd.PersistentFlags().StringVar(&overrideProvider, "provider", "", "override LLM provider (anthropic|ollama)")
+	rootCmd.PersistentFlags().StringVar(&overrideProvider, "provider", "", "override LLM provider (gemini|anthropic|openai-compatible|ollama)")
 	rootCmd.PersistentFlags().StringVar(&overrideModel, "model", "", "override LLM model")
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(ingestCmd)
