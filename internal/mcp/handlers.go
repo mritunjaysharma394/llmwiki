@@ -18,7 +18,6 @@ import (
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
-	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 	"github.com/mritunjaysharma394/llmwiki/internal/wiki"
 )
 
@@ -244,9 +243,11 @@ func runLintInternal(ctx context.Context, d Deps) (LintResult, error) {
 			end = len(pages)
 		}
 		batch := pages[i:end]
-		// Phase B Task 5: pass schema.Bundled() temporarily; Phase I
-		// (Task 14) wires the active schema in via Deps.Schema.
-		result, err := wiki.DetectContradictions(ctx, d.Client, batch, schema.Bundled())
+		// Phase I Task 14: thread the active schema (loaded once at
+		// server start from cmd/root.go's activeSchema) through the
+		// contradiction-detection prompt. Bundled() falls back here
+		// when no AGENTS.md / CLAUDE.md is present at the wiki root.
+		result, err := wiki.DetectContradictions(ctx, d.Client, batch, d.Schema)
 		if err != nil {
 			out.Contradictions = append(out.Contradictions, fmt.Sprintf("  WARN: contradiction check failed: %v", err))
 			continue
@@ -405,9 +406,11 @@ func askHandler(d Deps) mcpsrv.ToolHandlerFunc {
 			})
 		}
 
-		// Phase B Task 5: pass schema.Bundled() temporarily; Phase I
-		// (Task 14) wires the active schema in via Deps.Schema.
-		answer, err := wiki.AnswerQuestion(ctx, d.Client, question, pages, schema.Bundled())
+		// Phase I Task 14: thread the active schema (loaded once at
+		// server start from cmd/root.go's activeSchema) through the
+		// ask prompt; Bundled() falls back when no AGENTS.md /
+		// CLAUDE.md is present at the wiki root.
+		answer, err := wiki.AnswerQuestion(ctx, d.Client, question, pages, d.Schema)
 		if err != nil {
 			return errorResult("llm_error", "answering question: "+err.Error(), nil), nil
 		}
@@ -706,14 +709,15 @@ func writePageHandler(d Deps) mcpsrv.ToolHandlerFunc {
 		if err != nil || stored == nil {
 			return errorResult("write_failed", "re-fetching written page", nil), nil
 		}
-		// Sub-project 7 / Phase D Task 8: stamp the active schema hash on
-		// the just-written page. TRUST PROPERTY: this stamp happens AFTER
-		// ValidateAndAttachEvidence has gated the proposed body — the
-		// evidence_invalid branch above returns early and never reaches
-		// this code. For Task 8 we use schema.Bundled() as the
-		// placeholder; Phase I (Task 14) wires the active schema in via
-		// Deps.Schema. Stamp failures are non-fatal.
-		if err := d.DB.UpdateSchemaHash(stored.ID, schema.Bundled().Hash()); err != nil {
+		// Sub-project 7 / Phase I Task 14: stamp the active schema hash
+		// on the just-written page. TRUST PROPERTY: this stamp happens
+		// AFTER ValidateAndAttachEvidence has gated the proposed body —
+		// the evidence_invalid branch above returns early and never
+		// reaches this code. Phase D Task 8 stamped with the bundled
+		// hash as a placeholder; Phase I switches to d.Schema.Hash() so
+		// pages written via mcp.write_page carry the same drift surface
+		// as pages written via cmd/ingest. Stamp failures are non-fatal.
+		if err := d.DB.UpdateSchemaHash(stored.ID, d.Schema.Hash()); err != nil {
 			fmt.Fprintf(os.Stderr, "  WARN stamping schema_hash for %q: %v\n", page.Title, err)
 		}
 
@@ -757,7 +761,7 @@ func writePageHandler(d Deps) mcpsrv.ToolHandlerFunc {
 		// BEFORE RegenerateIndex so index.md reflects the bumped
 		// updated_at on any rewritten existing pages. Failures go to
 		// stderr and don't undo the disk write.
-		retroRes, rlErr := wiki.RetroLinkPages(d.DB, d.Cfg.WikiDir, []string{page.Title}, schema.Bundled().Hash())
+		retroRes, rlErr := wiki.RetroLinkPages(d.DB, d.Cfg.WikiDir, []string{page.Title}, d.Schema.Hash())
 		if rlErr != nil {
 			fmt.Fprintf(os.Stderr, "  WARN retro-linking existing pages after mcp.write_page: %v\n", rlErr)
 		}
@@ -848,6 +852,14 @@ func ingestHandler(d Deps) mcpsrv.ToolHandlerFunc {
 			// tunables; an MCP client that wants those should set them
 			// in [ingest] config.
 			// Logger left nil → io.Discard inside IngestSource.
+
+			// Sub-project 7 / Phase I Task 14: thread the active schema
+			// (loaded once at server start from cmd/root.go's
+			// activeSchema) through every prompt-using ingest call —
+			// IngestSourceFilesToPages, DetectIngestContradictions,
+			// UpdateExistingPagesFromSource. Bundled() falls back here
+			// when no AGENTS.md / CLAUDE.md is present at the wiki root.
+			Schema: d.Schema,
 		}
 		if mp := req.GetInt("max_pages", 0); mp > 0 {
 			opts.MaxPages = mp
@@ -918,6 +930,13 @@ func promoteAnswerHandler(d Deps) mcpsrv.ToolHandlerFunc {
 			Title:   req.GetString("title", ""),
 			Rewrite: req.GetBool("rewrite", false),
 			NoSave:  req.GetBool("no_save", false),
+			// Sub-project 7 / Phase I Task 14: thread the active schema
+			// into the optional rewrite path. The trust gate
+			// (ValidateAndAttachEvidence) and the post-rewrite
+			// verbatim-quote re-check run regardless of schema content,
+			// so the schema only parameterises *what is asked*, not
+			// *what is checked*.
+			Schema: d.Schema,
 		}
 
 		wcfg := wiki.IngestSourceConfig{
@@ -962,6 +981,71 @@ func promoteAnswerHandler(d Deps) mcpsrv.ToolHandlerFunc {
 			"evidence_quotes":    res.EvidenceQuotes,
 			"rewrite_applied":    res.RewriteApplied,
 			"retro_linked_pages": retro,
+		})
+	}
+}
+
+// ----- get_schema --------------------------------------------------------
+//
+// getSchemaHandler returns the active wiki schema as a structured
+// payload. Read-only by design (Q15). The shape is:
+//
+//	{
+//	  "schema_version":   <int>,
+//	  "domain":           "<string>",
+//	  "ontology_fields":  ["title", "body", "evidence", ...],
+//	  "prompts": {
+//	    "ingest":               "...",
+//	    "update_existing":      "...",
+//	    "ask":                  "...",
+//	    "contradiction":        "...",
+//	    "promote_rewrite":      "...",
+//	    "lint_contradictions": "..."
+//	  },
+//	  "glossary": [{"term": "...", "definition": "..."}, ...],
+//	  "hash":     "<hex>",
+//	  "doc_path": "AGENTS.md" | "CLAUDE.md" | ""
+//	}
+//
+// ontology_fields uses OntologyField.DeclaredName (not CanonicalName), so
+// a user who renamed `evidence` -> `citations` sees `["title", "body",
+// "citations", ...]` — that's the agent-facing surface. The `prompts`
+// values are the RAW prompt templates from the active schema — NOT
+// rendered; agents introspect the templates, the server renders them
+// at LLM-call time. This is why get_schema is safe and useful: agents
+// can read prompts to understand the wiki without being able to
+// override them per-call.
+//
+// TRUST PROPERTY UNCHANGED. get_schema is a pure read; the trust gate
+// (ValidateAndAttachEvidence) runs after every LLM call regardless of
+// what an agent learns from the schema.
+
+func getSchemaHandler(d Deps) mcpsrv.ToolHandlerFunc {
+	return func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+		sch := d.Schema
+		ontologyFields := make([]string, len(sch.Ontology.Fields))
+		for i, f := range sch.Ontology.Fields {
+			ontologyFields[i] = f.DeclaredName
+		}
+		glossary := make([]map[string]string, len(sch.Glossary))
+		for i, g := range sch.Glossary {
+			glossary[i] = map[string]string{"term": g.Term, "definition": g.Definition}
+		}
+		return jsonResult(map[string]any{
+			"schema_version":  sch.Version,
+			"domain":          sch.Domain,
+			"ontology_fields": ontologyFields,
+			"prompts": map[string]string{
+				"ingest":              sch.Prompts.Ingest,
+				"update_existing":     sch.Prompts.UpdateExisting,
+				"ask":                 sch.Prompts.Ask,
+				"contradiction":       sch.Prompts.Contradiction,
+				"promote_rewrite":     sch.Prompts.PromoteRewrite,
+				"lint_contradictions": sch.Prompts.LintContradictions,
+			},
+			"glossary": glossary,
+			"hash":     sch.Hash(),
+			"doc_path": sch.DocPath,
 		})
 	}
 }

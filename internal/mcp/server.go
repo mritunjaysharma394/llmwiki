@@ -10,6 +10,7 @@ import (
 
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 )
 
 // Config carries the slim subset of cmd.Config the MCP handlers need. The
@@ -26,21 +27,34 @@ type Config struct {
 // construct Deps directly with an in-memory-friendly llm.Client; production
 // code (Phase G2's cmd/mcp.go) builds it from cmd.Config and the same
 // llmClient the rest of the CLI uses.
+//
+// Schema is the active schema doc (sub-project 7 / Phase I Task 14): a
+// snapshot loaded once at server start from cmd/root.go's activeSchema,
+// which itself is the result of schema.Load(wikiRoot) (returning the
+// bundled default when no AGENTS.md / CLAUDE.md is present). The handlers
+// thread it into every wiki entrypoint that takes a schema argument
+// (ingest, ask, lint, promote) and surface it via the read-only
+// `get_schema` tool. There is no per-call override and no
+// `set_schema` / `write_schema` tool — the schema is the user's; agents
+// introspect, they do not edit (Q15).
 type Deps struct {
 	Cfg    Config
 	DB     *db.DB
 	Client llm.Client
+	Schema schema.Schema
 }
 
 const (
 	serverName    = "llmwiki"
-	serverVersion = "0.6.0-rc.1" // bumped from "0.5.0-rc.1" for sub-project 6b (cross-page page-update pass)
+	serverVersion = "0.7.0-rc.1" // bumped from "0.6.0-rc.1" for sub-project 7 (user-editable schema)
 )
 
-// NewServer registers all seven tools — four read-only (list_pages, read_page,
-// lint, ask) and three write-side (write_page, ingest, promote_answer). The
-// promote_answer tool was added in sub-project 6a and mirrors
-// wiki.PromoteAnswer's defensive re-validation contract.
+// NewServer registers all eight tools — five read-only (list_pages,
+// read_page, lint, ask, get_schema) and three write-side (write_page,
+// ingest, promote_answer). promote_answer was added in sub-project 6a;
+// get_schema was added in sub-project 7 / Phase I Task 14 and surfaces
+// the active schema as a structured payload (read-only — no
+// `set_schema` or `write_schema` counterpart, Q15).
 func NewServer(d Deps) *mcpsrv.MCPServer {
 	s := mcpsrv.NewMCPServer(serverName, serverVersion)
 	s.AddTool(listPagesTool(), listPagesHandler(d))
@@ -50,6 +64,7 @@ func NewServer(d Deps) *mcpsrv.MCPServer {
 	s.AddTool(writePageTool(), writePageHandler(d))
 	s.AddTool(ingestTool(), ingestHandler(d))
 	s.AddTool(promoteAnswerTool(), promoteAnswerHandler(d))
+	s.AddTool(getSchemaTool(), getSchemaHandler(d))
 	return s
 }
 
@@ -182,5 +197,35 @@ func promoteAnswerTool() mcpgo.Tool {
 			mcpgo.Description("LLM-rewrite the answer body into wiki prose; default false. The rewrite must preserve every evidence quote verbatim or it falls back to the verbatim body.")),
 		mcpgo.WithBoolean("no_save",
 			mcpgo.Description("Skip appending a **promote** line to log.md; default false. Debug-only.")),
+	)
+}
+
+// getSchemaTool exposes the active wiki schema (the merged
+// bundled+user content) over MCP. Read-only by design (Q15): there is
+// no `set_schema` / `write_schema` counterpart. An agent that can
+// rewrite the system prompts an agent runs against is a confused-deputy
+// surface; agents read the schema to adapt behaviour, they do not
+// edit it. The schema is the user's; agents introspect; that's it.
+//
+// The Karpathy-pattern alignment is the reason this tool exists at
+// all: an agent asked "ingest this URL" can call get_schema first,
+// learn the wiki's domain ("meeting notes" vs "research papers"), and
+// tailor its ingestion behaviour accordingly — all in one round-trip,
+// no out-of-band signalling required.
+//
+// TRUST PROPERTY UNCHANGED. get_schema is a pure read; the trust gate
+// (ValidateAndAttachEvidence) is unaffected by what an agent learns
+// from this tool.
+func getSchemaTool() mcpgo.Tool {
+	return mcpgo.NewTool(
+		"get_schema",
+		mcpgo.WithDescription(
+			"Return the active wiki schema (the merged bundled+user content). "+
+				"Read-only; no per-call overrides. Agents that introspect the schema "+
+				"before acting (Karpathy-pattern compliant) can adapt their behaviour "+
+				"to 'this wiki is about meeting notes' without out-of-band signalling. "+
+				"Returns schema_version, domain, ontology_fields, prompts (raw "+
+				"templates — the server renders them at LLM-call time), glossary, "+
+				"hash, and doc_path (\"AGENTS.md\" / \"CLAUDE.md\" / \"\" for bundled)."),
 	)
 }

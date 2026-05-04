@@ -51,6 +51,12 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	// explicitly to defend against future code that swaps it.
 	log.SetOutput(os.Stderr)
 
+	// Sub-project 7 / Phase I Task 14: pass the active schema (loaded
+	// once by cmd/root.go's loadConfig from AGENTS.md / CLAUDE.md or
+	// the bundled default) into the MCP server so every handler that
+	// runs an LLM prompt — ingest, ask, lint, promote — uses the same
+	// schema the rest of the CLI does, and so the new read-only
+	// `get_schema` tool can surface it to agents.
 	srv := mcp.NewServer(mcp.Deps{
 		Cfg: mcp.Config{
 			WikiDir: cfg.Wiki.WikiDir,
@@ -59,6 +65,7 @@ func runMCP(cmd *cobra.Command, args []string) error {
 		},
 		DB:     database,
 		Client: llmClient,
+		Schema: activeSchema,
 	})
 
 	// server.ServeStdio installs its own SIGINT/SIGTERM handler; we wrap

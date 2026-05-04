@@ -17,6 +17,7 @@ import (
 
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 	"github.com/mritunjaysharma394/llmwiki/internal/wiki"
 )
 
@@ -49,7 +50,9 @@ func (f *fakeClient) CompleteStream(ctx context.Context, system, user string, w 
 }
 
 // newTestDeps opens a fresh on-disk sqlite DB under t.TempDir(), seeds the
-// caller-provided fixtures, and returns a Deps wired with a fakeClient.
+// caller-provided fixtures, and returns a Deps wired with a fakeClient
+// and the bundled schema (mirroring the production path's
+// schema.Load-falls-back-to-Bundled behaviour when no AGENTS.md is on disk).
 func newTestDeps(t *testing.T, client llm.Client) (Deps, func()) {
 	t.Helper()
 	dir := t.TempDir()
@@ -68,6 +71,7 @@ func newTestDeps(t *testing.T, client llm.Client) (Deps, func()) {
 		},
 		DB:     d,
 		Client: client,
+		Schema: schema.Bundled(),
 	}
 	return deps, func() { _ = d.Close() }
 }
@@ -115,7 +119,7 @@ func callTool(t *testing.T, c *mcpc.Client, name string, args map[string]any) (*
 	return res, ""
 }
 
-func TestNewServer_RegistersAllSevenTools(t *testing.T) {
+func TestNewServer_RegistersAllEightTools(t *testing.T) {
 	deps, cleanup := newTestDeps(t, nil)
 	defer cleanup()
 
@@ -127,7 +131,9 @@ func TestNewServer_RegistersAllSevenTools(t *testing.T) {
 		got = append(got, name)
 	}
 	sort.Strings(got)
-	want := []string{"ask", "ingest", "lint", "list_pages", "promote_answer", "read_page", "write_page"}
+	// Sub-project 7 / Phase I Task 14 added get_schema to the seven
+	// existing tools, taking the count to eight.
+	want := []string{"ask", "get_schema", "ingest", "lint", "list_pages", "promote_answer", "read_page", "write_page"}
 	if !equalSlices(got, want) {
 		t.Errorf("tool names = %v, want %v", got, want)
 	}
@@ -968,7 +974,8 @@ func seedPromoteFixture(t *testing.T, deps Deps, sourceContent, question, answer
 }
 
 // TestPromoteAnswer_ToolRegistered asserts the tool appears in
-// srv.ListTools() and serverVersion bumps to 1.2.0.
+// srv.ListTools(). The serverVersion check tracks the current
+// release line — sub-project 7 / Phase I bumps to 0.7.0-rc.1.
 func TestPromoteAnswer_ToolRegistered(t *testing.T) {
 	deps, cleanup := newTestDeps(t, nil)
 	defer cleanup()
@@ -983,8 +990,8 @@ func TestPromoteAnswer_ToolRegistered(t *testing.T) {
 		sort.Strings(got)
 		t.Fatalf("promote_answer not registered; tools=%v", got)
 	}
-	if serverVersion != "0.6.0-rc.1" {
-		t.Errorf("serverVersion = %q, want %q", serverVersion, "0.6.0-rc.1")
+	if serverVersion != "0.7.0-rc.1" {
+		t.Errorf("serverVersion = %q, want %q", serverVersion, "0.7.0-rc.1")
 	}
 }
 
@@ -1109,12 +1116,13 @@ func TestPromoteAnswer_StaleEvidence(t *testing.T) {
 // target title; the handler should return a structured title_exists.
 // ----- Phase E (sub-project 6b) — mcp.ingest update_existing wiring -----
 
-// TestServerVersionIs060 pins the serverVersion constant to the v0.6
-// release line. Sub-project 6b bumps from "0.5.0-rc.1" to "0.6.0-rc.1";
-// this guard rail catches accidental rollback of the version string.
-func TestServerVersionIs060(t *testing.T) {
-	if serverVersion != "0.6.0-rc.1" {
-		t.Errorf("serverVersion = %q, want %q", serverVersion, "0.6.0-rc.1")
+// TestServerVersionIs070 pins the serverVersion constant to the v0.7
+// release line. Sub-project 7 / Phase I Task 14 bumps from
+// "0.6.0-rc.1" to "0.7.0-rc.1"; this guard rail catches accidental
+// rollback of the version string.
+func TestServerVersionIs070(t *testing.T) {
+	if serverVersion != "0.7.0-rc.1" {
+		t.Errorf("serverVersion = %q, want %q", serverVersion, "0.7.0-rc.1")
 	}
 }
 
@@ -1370,5 +1378,385 @@ func TestPromoteAnswer_TitleCollision(t *testing.T) {
 	}
 	if got["existing_path"] != preExistingPath {
 		t.Errorf("existing_path = %v, want %s", got["existing_path"], preExistingPath)
+	}
+}
+
+// ----- get_schema tests (Phase I / sub-project 7) ----------------------
+
+// validSchemaFixture is a syntactically-valid AGENTS.md / CLAUDE.md body
+// the get_schema tests parse with schema.Parse to spin up Deps.Schema
+// pointing at a custom schema. The Domain section is uniquely set so
+// tests can assert the *active* schema (not the bundled default) is
+// what flows through the handlers.
+const validSchemaFixture = `---
+schema_version: 1
+generator: llmwiki-test
+---
+
+# llmwiki schema (mcp test fixture)
+
+## Domain
+
+Custom test domain for mcp.get_schema unit tests.
+
+## Page ontology
+
+  - title         (string)         the page's primary key; unique per wiki
+  - body          (markdown)       the page's narrative
+  - citations     (list of quotes) verbatim spans from sources; required, >= 1
+  - links         (list)           Obsidian wikilinks declared structurally
+  - sources       (list of paths)  derived from evidence; emitted by WritePage
+  - tags          (list of strings) Obsidian/Dataview-friendly
+  - created       (date)           first-ingest date
+  - updated_at    (RFC3339 ts)     last-write timestamp
+  - content_hash  (sha256)         body hash; recomputed at every write
+  - source_ids    (list of int)    DB row IDs backing this page
+
+## Ingest prompt
+
+CUSTOM ingest prompt for tests. {{domain}} {{existing_titles}}
+
+## Update-existing prompt
+
+CUSTOM update prompt for tests. {{domain}} {{existing_page_body}} {{existing_evidence}}
+
+## Ask prompt
+
+CUSTOM ask prompt for tests. {{domain}}
+
+## Contradiction prompt
+
+CUSTOM contradiction prompt for tests.
+
+## Promote rewrite prompt
+
+CUSTOM promote rewrite. {{question}} {{answer_body}} {{evidence_quotes}}
+
+## Lint contradictions prompt
+
+CUSTOM lint contradictions prompt.
+
+## Glossary
+
+  - widget: a small thing
+  - gizmo: a slightly larger small thing
+`
+
+// TestGetSchema_BundledByDefault drives the MCP server in-process with
+// Deps.Schema = schema.Bundled() (the default newTestDeps wires) and
+// asserts the get_schema payload matches the bundled state: doc_path
+// is empty (no on-disk AGENTS.md / CLAUDE.md), hash equals
+// schema.Bundled().Hash(), schema_version is 1, and ontology_fields
+// equals the canonical bundled list.
+func TestGetSchema_BundledByDefault(t *testing.T) {
+	deps, cleanup := newTestDeps(t, nil)
+	defer cleanup()
+
+	srv := NewServer(deps)
+	c, done := connect(t, srv)
+	defer done()
+
+	res, text := callTool(t, c, "get_schema", map[string]any{})
+	if res.IsError {
+		t.Fatalf("get_schema returned IsError=true: %s", text)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("unmarshal: %v\nraw=%s", err, text)
+	}
+
+	if dp, _ := got["doc_path"].(string); dp != "" {
+		t.Errorf("doc_path = %q, want \"\" (bundled has no on-disk path)", dp)
+	}
+	if h, _ := got["hash"].(string); h != schema.Bundled().Hash() {
+		t.Errorf("hash = %q, want %q", h, schema.Bundled().Hash())
+	}
+	if sv, _ := got["schema_version"].(float64); int(sv) != 1 {
+		t.Errorf("schema_version = %v, want 1", got["schema_version"])
+	}
+	rawFields, ok := got["ontology_fields"].([]any)
+	if !ok {
+		t.Fatalf("ontology_fields not []any (raw=%s)", text)
+	}
+	gotFields := make([]string, len(rawFields))
+	for i, f := range rawFields {
+		gotFields[i], _ = f.(string)
+	}
+	wantFields := []string{
+		"title", "body", "evidence", "links", "sources",
+		"tags", "created", "updated_at", "content_hash", "source_ids",
+	}
+	if !equalSlices(gotFields, wantFields) {
+		t.Errorf("ontology_fields = %v, want %v", gotFields, wantFields)
+	}
+}
+
+// TestGetSchema_ReturnsActivePromptsAndOntology spins up Deps.Schema
+// from a parsed custom fixture (with `evidence` renamed to `citations`
+// and uniquely-tagged prompts) and asserts the get_schema response
+// surfaces the user's text — the raw template, not the rendered
+// output. The DocPath round-trip ("AGENTS.md") is also asserted since
+// that is the agent-facing signal for "this wiki has a hand-edited
+// schema doc".
+func TestGetSchema_ReturnsActivePromptsAndOntology(t *testing.T) {
+	deps, cleanup := newTestDeps(t, nil)
+	defer cleanup()
+
+	custom, err := schema.Parse([]byte(validSchemaFixture))
+	if err != nil {
+		t.Fatalf("schema.Parse fixture: %v", err)
+	}
+	custom.DocPath = "AGENTS.md"
+	deps.Schema = custom
+
+	srv := NewServer(deps)
+	c, done := connect(t, srv)
+	defer done()
+
+	res, text := callTool(t, c, "get_schema", map[string]any{})
+	if res.IsError {
+		t.Fatalf("get_schema returned IsError=true: %s", text)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("unmarshal: %v\nraw=%s", err, text)
+	}
+
+	if dp, _ := got["doc_path"].(string); dp != "AGENTS.md" {
+		t.Errorf("doc_path = %q, want %q", dp, "AGENTS.md")
+	}
+	if h, _ := got["hash"].(string); h != custom.Hash() {
+		t.Errorf("hash = %q, want custom %q", h, custom.Hash())
+	}
+
+	prompts, ok := got["prompts"].(map[string]any)
+	if !ok {
+		t.Fatalf("prompts not map[string]any (raw=%s)", text)
+	}
+	// Verify the raw template is what flows through — not the rendered
+	// output. Each prompt body in the fixture starts with "CUSTOM ".
+	wantContains := map[string]string{
+		"ingest":              "CUSTOM ingest prompt for tests.",
+		"update_existing":     "CUSTOM update prompt for tests.",
+		"ask":                 "CUSTOM ask prompt for tests.",
+		"contradiction":       "CUSTOM contradiction prompt for tests.",
+		"promote_rewrite":     "CUSTOM promote rewrite.",
+		"lint_contradictions": "CUSTOM lint contradictions prompt.",
+	}
+	for name, want := range wantContains {
+		body, _ := prompts[name].(string)
+		if !strings.Contains(body, want) {
+			t.Errorf("prompts[%q] = %q, want it to contain %q", name, body, want)
+		}
+	}
+	// Raw templates must contain the {{placeholder}} tokens — the
+	// server renders them at LLM-call time, not at get_schema time.
+	if !strings.Contains(prompts["ingest"].(string), "{{domain}}") {
+		t.Errorf("ingest prompt must keep {{domain}} placeholder unrendered (raw=%s)", prompts["ingest"])
+	}
+	if !strings.Contains(prompts["ingest"].(string), "{{existing_titles}}") {
+		t.Errorf("ingest prompt must keep {{existing_titles}} placeholder unrendered (raw=%s)", prompts["ingest"])
+	}
+
+	// ontology_fields uses DeclaredName, so the renamed `citations`
+	// shows up in the agent-facing surface.
+	rawFields, ok := got["ontology_fields"].([]any)
+	if !ok {
+		t.Fatalf("ontology_fields not []any (raw=%s)", text)
+	}
+	hasCitations := false
+	for _, f := range rawFields {
+		if s, _ := f.(string); s == "citations" {
+			hasCitations = true
+		}
+	}
+	if !hasCitations {
+		t.Errorf("ontology_fields = %v, want it to contain renamed declared name \"citations\"", rawFields)
+	}
+
+	// Glossary round-trip: the fixture lists two terms.
+	glossary, ok := got["glossary"].([]any)
+	if !ok {
+		t.Fatalf("glossary not []any (raw=%s)", text)
+	}
+	if len(glossary) != 2 {
+		t.Errorf("glossary length = %d, want 2 (raw=%s)", len(glossary), text)
+	}
+
+	if dom, _ := got["domain"].(string); !strings.Contains(dom, "Custom test domain") {
+		t.Errorf("domain = %q, want it to mention 'Custom test domain'", dom)
+	}
+}
+
+// TestGetSchema_ReadOnly_NoSetSchemaTool walks the registered tool list
+// and asserts no tool name carries any schema-mutating shape. Q15 — the
+// schema is the user's; agents introspect, they do not edit. An agent
+// that can rewrite the system prompts an agent runs against is a
+// confused-deputy surface.
+func TestGetSchema_ReadOnly_NoSetSchemaTool(t *testing.T) {
+	deps, cleanup := newTestDeps(t, nil)
+	defer cleanup()
+
+	srv := NewServer(deps)
+	tools := srv.ListTools()
+	for name := range tools {
+		lower := strings.ToLower(name)
+		for _, banned := range []string{"set_schema", "write_schema", "update_schema", "edit_schema", "modify_schema", "patch_schema"} {
+			if strings.Contains(lower, banned) {
+				t.Errorf("tool %q contains banned schema-mutating substring %q (Q15: read-only is the contract)", name, banned)
+			}
+		}
+	}
+}
+
+// TestGetSchema_ResponseShape pins the exact JSON keys of the
+// get_schema response. Sub-project 7 / Phase I Task 14 fixes the
+// payload shape; downstream agents will key off it. This test catches
+// accidental key renames or omissions.
+func TestGetSchema_ResponseShape(t *testing.T) {
+	deps, cleanup := newTestDeps(t, nil)
+	defer cleanup()
+
+	srv := NewServer(deps)
+	c, done := connect(t, srv)
+	defer done()
+
+	res, text := callTool(t, c, "get_schema", map[string]any{})
+	if res.IsError {
+		t.Fatalf("get_schema returned IsError=true: %s", text)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("unmarshal: %v\nraw=%s", err, text)
+	}
+
+	wantTopKeys := []string{
+		"schema_version", "domain", "ontology_fields",
+		"prompts", "glossary", "hash", "doc_path",
+	}
+	for _, k := range wantTopKeys {
+		if _, ok := got[k]; !ok {
+			t.Errorf("response missing top-level key %q (raw=%s)", k, text)
+		}
+	}
+	gotTop := make([]string, 0, len(got))
+	for k := range got {
+		gotTop = append(gotTop, k)
+	}
+	sort.Strings(gotTop)
+	sortedWant := append([]string(nil), wantTopKeys...)
+	sort.Strings(sortedWant)
+	if !equalSlices(gotTop, sortedWant) {
+		t.Errorf("response keys = %v, want exactly %v", gotTop, sortedWant)
+	}
+
+	prompts, ok := got["prompts"].(map[string]any)
+	if !ok {
+		t.Fatalf("prompts not map (raw=%s)", text)
+	}
+	wantPromptKeys := []string{
+		"ingest", "update_existing", "ask", "contradiction",
+		"promote_rewrite", "lint_contradictions",
+	}
+	for _, k := range wantPromptKeys {
+		if _, ok := prompts[k]; !ok {
+			t.Errorf("prompts missing key %q (raw=%s)", k, text)
+		}
+	}
+	gotPrompt := make([]string, 0, len(prompts))
+	for k := range prompts {
+		gotPrompt = append(gotPrompt, k)
+	}
+	sort.Strings(gotPrompt)
+	sortedWantPrompts := append([]string(nil), wantPromptKeys...)
+	sort.Strings(sortedWantPrompts)
+	if !equalSlices(gotPrompt, sortedWantPrompts) {
+		t.Errorf("prompts keys = %v, want exactly %v", gotPrompt, sortedWantPrompts)
+	}
+}
+
+// promptCapturingClient records every (system, user) prompt pair sent
+// through Complete / CompleteStream so TestMCPHandlersThreadSchema_NotJustBundled
+// can assert the active schema's text — not the bundled default —
+// flows through the prompt path.
+type promptCapturingClient struct {
+	systemPrompts []string
+	userPrompts   []string
+}
+
+func (p *promptCapturingClient) Complete(ctx context.Context, system, user string) (string, error) {
+	p.systemPrompts = append(p.systemPrompts, system)
+	p.userPrompts = append(p.userPrompts, user)
+	return "stub answer", nil
+}
+
+func (p *promptCapturingClient) CompleteStructured(ctx context.Context, system, user string, ts llm.ToolSchema) (map[string]any, error) {
+	p.systemPrompts = append(p.systemPrompts, system)
+	p.userPrompts = append(p.userPrompts, user)
+	return map[string]any{}, nil
+}
+
+func (p *promptCapturingClient) CompleteStream(ctx context.Context, system, user string, w io.Writer) (string, error) {
+	p.systemPrompts = append(p.systemPrompts, system)
+	p.userPrompts = append(p.userPrompts, user)
+	if _, err := w.Write([]byte("stub answer")); err != nil {
+		return "", err
+	}
+	return "stub answer", nil
+}
+
+// TestMCPHandlersThreadSchema_NotJustBundled drives askHandler with
+// Deps.Schema set to a custom parsed schema and asserts the system
+// prompt sent to the LLM contains the custom prompt body — not the
+// bundled default. This is the load-bearing test for Phase I: it
+// proves the handlers actually thread d.Schema through to the wiki
+// entrypoints rather than silently falling back to schema.Bundled().
+func TestMCPHandlersThreadSchema_NotJustBundled(t *testing.T) {
+	pc := &promptCapturingClient{}
+	deps, cleanup := newTestDeps(t, pc)
+	defer cleanup()
+
+	custom, err := schema.Parse([]byte(validSchemaFixture))
+	if err != nil {
+		t.Fatalf("schema.Parse fixture: %v", err)
+	}
+	deps.Schema = custom
+
+	// Seed a page so askHandler has something to bundle into the prompt.
+	srcID, _ := deps.DB.UpsertSource("seed:custom-schema", "h")
+	sfID, _ := deps.DB.UpsertSourceFile(db.SourceFile{
+		SourceID: srcID, RelativePath: "guide.md", ContentHash: "h", ByteSize: 4, LineCount: 4,
+	})
+	if err := deps.DB.UpsertPage(db.PageRecord{
+		Title: "Channels", Path: "Channels.md", Body: "Channel body discusses blocking.",
+		ContentHash: "abc", SourceIDs: []int64{srcID},
+	}); err != nil {
+		t.Fatalf("UpsertPage: %v", err)
+	}
+	p, _ := deps.DB.GetPage("Channels")
+	_ = deps.DB.InsertEvidence(p.ID, srcID, []db.Evidence{
+		{Quote: "channels block when full", LineStart: 4, LineEnd: 4, SourceFileID: &sfID},
+	})
+
+	srv := NewServer(deps)
+	c, done := connect(t, srv)
+	defer done()
+
+	if _, _ = callTool(t, c, "ask", map[string]any{"question": "what about channels?"}); len(pc.systemPrompts) == 0 {
+		t.Fatalf("no LLM prompt captured by stub client")
+	}
+	// The custom ask prompt's distinctive marker is "CUSTOM ask
+	// prompt for tests." — if the handler had silently used
+	// schema.Bundled() we would see the bundled "You answer using the
+	// provided wiki pages and source quotes." instead.
+	combined := strings.Join(pc.systemPrompts, "\n----\n") + strings.Join(pc.userPrompts, "\n----\n")
+	if !strings.Contains(combined, "CUSTOM ask prompt for tests.") {
+		t.Errorf("captured prompts do not contain the custom schema's ask body; raw system prompts:\n%s",
+			strings.Join(pc.systemPrompts, "\n---\n"))
+	}
+	// Negative assertion: the bundled default's distinctive opener
+	// must NOT appear when a custom schema is active.
+	if strings.Contains(combined, "You answer using the provided wiki pages and source quotes.") {
+		t.Errorf("bundled default ask prompt leaked into prompt path despite custom schema being active")
 	}
 }
