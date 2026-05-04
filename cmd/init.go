@@ -14,7 +14,7 @@ import (
 // free tier with no credit card required is the lowest-friction first run.
 const defaultConfigGeminiToml = `[llm]
 provider = "gemini"
-model = "gemini-2.0-flash"
+model = "gemini-2.5-flash"
 ollama_url = "http://localhost:11434"
 
 [wiki]
@@ -39,7 +39,7 @@ feed_max_entries = 50
 sitemap_max_pages = 200
 
 [providers.gemini]
-default_model = "gemini-2.0-flash"
+default_model = "gemini-2.5-flash"
 
 [providers.anthropic]
 default_model = "claude-haiku-4-5"

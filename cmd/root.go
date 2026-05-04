@@ -255,7 +255,7 @@ func loadConfig() error {
 // applyIngestDefaults uses for [ingest].
 func applyProviderDefaults(cfg *Config) {
 	if cfg.Providers.Gemini.DefaultModel == "" {
-		cfg.Providers.Gemini.DefaultModel = "gemini-2.0-flash"
+		cfg.Providers.Gemini.DefaultModel = "gemini-2.5-flash"
 	}
 	if cfg.Providers.Anthropic.DefaultModel == "" {
 		cfg.Providers.Anthropic.DefaultModel = "claude-haiku-4-5"

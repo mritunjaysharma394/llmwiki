@@ -74,7 +74,7 @@ dropped before disk.
 
 | Provider              | Cost                          | Setup                                                                                              | Notes                                                                                       |
 | --------------------- | ----------------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `gemini` *(default)*  | Free tier; 1M context         | `export GEMINI_API_KEY=...` (get one at https://aistudio.google.com/apikey, no card)               | Default model `gemini-2.0-flash`. Recommended onboarding path.                              |
+| `gemini` *(default)*  | Free tier; 1M context         | `export GEMINI_API_KEY=...` (get one at https://aistudio.google.com/apikey, no card)               | Default model `gemini-2.5-flash`. Recommended onboarding path.                              |
 | `anthropic`           | Pay-per-token API, **or** free via MCP + Pro subscription | `export ANTHROPIC_API_KEY=sk-ant-...`, or skip the API entirely and use the MCP server below       | Default model `claude-haiku-4-5`. Highest quote-fidelity in our cassette tests.             |
 | `openai-compatible`   | Many free or near-free tiers  | Edit `[providers.openai_compat]` in `.llmwiki/config.toml` to point at your provider's `/v1` endpoint | Tested against Groq, OpenRouter, Together, Cerebras, Mistral La Plateforme. Free tiers may rate-limit and produce flakier structured output; the validator drops bad pages either way. |
 | `ollama`              | Free, fully offline           | `ollama pull llama3.2`, then `llmwiki init --provider ollama`                                      | Runs against `http://localhost:11434` by default. Source content never leaves your machine. |
@@ -488,7 +488,7 @@ Pre-existing configs missing newer keys silently inherit defaults.
 | Key          | Default                    | Description                                                                       |
 | ------------ | -------------------------- | --------------------------------------------------------------------------------- |
 | `provider`   | `"gemini"`                 | LLM provider: `"gemini"`, `"anthropic"`, `"openai-compatible"`, or `"ollama"`     |
-| `model`      | provider-dependent         | Model identifier passed to the provider (defaults: `gemini-2.0-flash`, `claude-haiku-4-5`, provider-config `default_model`, `llama3.2`) |
+| `model`      | provider-dependent         | Model identifier passed to the provider (defaults: `gemini-2.5-flash`, `claude-haiku-4-5`, provider-config `default_model`, `llama3.2`) |
 | `ollama_url` | `"http://localhost:11434"` | Base URL of the Ollama server                                                     |
 
 ### `[providers.openai_compat]`

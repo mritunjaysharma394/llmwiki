@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Default Gemini model bumped from `gemini-2.0-flash` (deprecated by
+  Google for new users; HTTP 404 on first ingest) to
+  `gemini-2.5-flash`. Affects the `init` config template, the
+  `[providers.gemini].default_model` fallback, and the README's
+  onboarding table. Existing wikis with `model = "gemini-2.0-flash"`
+  pinned in their `config.toml` should update the line by hand.
+  Cassette tests are unaffected — replay reads the recorded model
+  name from the JSON payloads, not the live default.
+
 ## [0.6.0-rc.1] — 2026-05-04
 
 ### Added

@@ -68,7 +68,7 @@ func TestInit_DefaultProviderIsGemini(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading config: %v", err)
 	}
-	want := []string{`provider = "gemini"`, `model = "gemini-2.0-flash"`}
+	want := []string{`provider = "gemini"`, `model = "gemini-2.5-flash"`}
 	for _, w := range want {
 		if !strings.Contains(string(body), w) {
 			t.Errorf("config missing %q in:\n%s", w, body)
@@ -290,8 +290,8 @@ db_path = ".llmwiki/wiki.db"
 	if err := loadConfig(); err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
-	if cfg.LLM.Model != "gemini-2.0-flash" {
-		t.Errorf("cfg.LLM.Model = %q, want default gemini-2.0-flash", cfg.LLM.Model)
+	if cfg.LLM.Model != "gemini-2.5-flash" {
+		t.Errorf("cfg.LLM.Model = %q, want default gemini-2.5-flash", cfg.LLM.Model)
 	}
 }
 
@@ -302,7 +302,7 @@ db_path = ".llmwiki/wiki.db"
 func TestApplyProviderDefaultsFillsZeroValues(t *testing.T) {
 	c := &Config{}
 	applyProviderDefaults(c)
-	if c.Providers.Gemini.DefaultModel != "gemini-2.0-flash" {
+	if c.Providers.Gemini.DefaultModel != "gemini-2.5-flash" {
 		t.Errorf("Gemini default = %q", c.Providers.Gemini.DefaultModel)
 	}
 	if c.Providers.Anthropic.DefaultModel != "claude-haiku-4-5" {
