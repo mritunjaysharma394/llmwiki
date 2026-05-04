@@ -802,3 +802,159 @@ func TestUpdateExistingHappyPath(t *testing.T) {
 		}
 	}
 }
+
+// TestUpdateExistingValidationDrop is the trust-property analogue of
+// v0.5's TestPromoteAnswerStaleEvidence on the v0.6 update path. The
+// cassette pins an LLM that hallucinates plausible-sounding quotes
+// when proposing an update body — quotes that don't substring-match
+// either the prior source S0 or the new source S1. The validator
+// catches this and the page must stay byte-identical at its prior
+// version on disk; a previously-valid page is never silently downgraded.
+//
+// Asserts:
+//
+//   - PagesUpdated == 0, PagesUpdateFailed == 1;
+//   - UpdateFailures contains the page with reason matching
+//     zero-quotes-matched or below-quote-floor;
+//   - the page body on disk is byte-identical to its pre-update snapshot;
+//   - page_update_log has one row for that page with outcome='failed'.
+//
+// Recording target is Gemini Flash by default; if pinning a deterministic
+// "LLM hallucinates" output proves flaky on re-record, swap to Anthropic
+// Haiku for this cassette only — the spec allows mixing per resolved Q2.
+//
+// The cassette JSON is NOT checked into this commit. The test skips
+// cleanly via the geminiIngestClient cassette-gate until the maintainer
+// records it manually.
+func TestUpdateExistingValidationDrop(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping cassette test in -short mode")
+	}
+	if _, err := os.Stat(filepath.Join("..", "internal", "llm", "testdata", "cassettes", "TestUpdateExistingValidationDrop__001.json")); os.IsNotExist(err) {
+		t.Skip("cassette not recorded; run with LLMWIKI_RECORD=1 GEMINI_API_KEY=... go test ./cmd/ -run TestUpdateExistingValidationDrop to record")
+	}
+	client := geminiIngestClient(t, "TestUpdateExistingValidationDrop")
+	if client == nil {
+		return // helper already called t.Skip
+	}
+
+	root := t.TempDir()
+	wikiDir := filepath.Join(root, "wiki")
+	rawDir := filepath.Join(root, "raw")
+	for _, d := range []string{wikiDir, rawDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	database, err := db.Open(filepath.Join(root, "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	cfg := wiki.IngestSourceConfig{WikiDir: wikiDir, RawDir: rawDir, RespectGitignore: true}
+
+	// Pre-seed source S0 + ingest it, producing a single page P with
+	// (recording-target willing) ≥5 valid evidence quotes. The cassette
+	// pins the LLM's response to S0 so the seed page lands deterministically.
+	s0Path := filepath.Join(root, "queue-semantics.md")
+	s0Body := "Bounded queues drop oldest entries when full.\n" +
+		"A bounded queue's drop policy is configurable per producer.\n" +
+		"Producers signal back-pressure when a bounded queue is full.\n" +
+		"The bounded queue's head pointer advances on each successful read.\n" +
+		"A bounded queue rejects pushes when its size equals its capacity.\n"
+	if err := os.WriteFile(s0Path, []byte(s0Body), 0644); err != nil {
+		t.Fatalf("write S0: %v", err)
+	}
+	if _, err := wiki.IngestSource(context.Background(), cfg, database, client, s0Path, wiki.IngestOptions{}); err != nil {
+		t.Fatalf("seed IngestSource S0: %v", err)
+	}
+
+	// Snapshot every pre-existing page's body+title — the cassette pins
+	// which exact title gets FTS-shortlisted by S1 and proposed for
+	// update; the assertion later only needs the title to look up the
+	// snapshot. We take all titles to stay agnostic to the LLM's choice.
+	preTitles, err := database.AllPageTitles()
+	if err != nil {
+		t.Fatalf("AllPageTitles: %v", err)
+	}
+	if len(preTitles) == 0 {
+		t.Fatalf("S0 ingest produced 0 pages; cassette may be stale")
+	}
+	preBodies := map[string][]byte{}
+	for _, title := range preTitles {
+		path := filepath.Join(wikiDir, title+".md")
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read pre %s: %v", title, err)
+		}
+		preBodies[title] = body
+	}
+
+	// Ingest S1 — the "poorly-quoting" source whose keywords overlap
+	// P (so P is FTS-shortlisted) but whose proposed update body's
+	// evidence quotes don't substring-match either S0 or S1. The
+	// cassette pins the hallucinated LLM response.
+	s1Path := filepath.Join(root, "queue-prose.md")
+	s1Body := "Bounded queues are common in concurrent systems.\nDifferent queue implementations balance throughput against latency.\n"
+	if err := os.WriteFile(s1Path, []byte(s1Body), 0644); err != nil {
+		t.Fatalf("write S1: %v", err)
+	}
+
+	res, err := wiki.IngestSource(context.Background(), cfg, database, client, s1Path, wiki.IngestOptions{
+		UpdateExisting: true,
+	})
+	if err != nil {
+		t.Fatalf("IngestSource (S1, update_existing=true): %v", err)
+	}
+
+	if res.PagesUpdated != 0 {
+		t.Errorf("PagesUpdated = %d, want 0", res.PagesUpdated)
+	}
+	if res.PagesUpdateFailed != 1 {
+		t.Errorf("PagesUpdateFailed = %d, want 1", res.PagesUpdateFailed)
+	}
+	if len(res.UpdateFailures) != 1 {
+		t.Fatalf("UpdateFailures len = %d, want 1 (got %+v)", len(res.UpdateFailures), res.UpdateFailures)
+	}
+	failed := res.UpdateFailures[0]
+	if failed.Reason != "zero-quotes-matched" && failed.Reason != "below-quote-floor" {
+		t.Errorf("UpdateFailures[0].Reason = %q, want zero-quotes-matched or below-quote-floor", failed.Reason)
+	}
+
+	// Trust property: the failed page's body on disk is byte-identical
+	// to its pre-update snapshot. A previously-valid page is never
+	// silently downgraded — when the validator drops every proposed
+	// quote, we keep the prior version.
+	prior, ok := preBodies[failed.Title]
+	if !ok {
+		t.Fatalf("failed page %q not in pre-snapshot (have %v)", failed.Title, preTitles)
+	}
+	postPath := filepath.Join(wikiDir, failed.Title+".md")
+	post, err := os.ReadFile(postPath)
+	if err != nil {
+		t.Fatalf("read post %s: %v", failed.Title, err)
+	}
+	if !bytes.Equal(prior, post) {
+		t.Errorf("page %q body changed despite update_failed; trust property violated", failed.Title)
+	}
+
+	// page_update_log: exactly one row for the failed page with outcome='failed'.
+	rec, err := database.GetPage(failed.Title)
+	if err != nil || rec == nil {
+		t.Fatalf("GetPage %q: %v (rec=%v)", failed.Title, err, rec)
+	}
+	entries, err := database.GetPageUpdateLog(rec.ID, 10)
+	if err != nil {
+		t.Fatalf("GetPageUpdateLog %q: %v", failed.Title, err)
+	}
+	var failedRows int
+	for _, e := range entries {
+		if e.Outcome == "failed" {
+			failedRows++
+		}
+	}
+	if failedRows != 1 {
+		t.Errorf("page %q: failed rows = %d, want 1 (entries: %+v)", failed.Title, failedRows, entries)
+	}
+}
