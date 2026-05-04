@@ -29,8 +29,8 @@ func TestOpenCreatesEvidenceAndSavedAnswers(t *testing.T) {
 	if err := d.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("user_version: %v", err)
 	}
-	if version != 3 {
-		t.Errorf("user_version = %d, want 3", version)
+	if version != 4 {
+		t.Errorf("user_version = %d, want 4", version)
 	}
 }
 
@@ -51,8 +51,8 @@ func TestOpenIsIdempotent(t *testing.T) {
 	if err := d2.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("user_version: %v", err)
 	}
-	if version != 3 {
-		t.Errorf("user_version after re-open = %d, want 3", version)
+	if version != 4 {
+		t.Errorf("user_version after re-open = %d, want 4", version)
 	}
 }
 
@@ -76,8 +76,8 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 	defer d2.Close()
 	var version int
 	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&version)
-	if version != 3 {
-		t.Errorf("user_version after upgrade = %d, want 3", version)
+	if version != 4 {
+		t.Errorf("user_version after upgrade = %d, want 4", version)
 	}
 }
 
@@ -112,8 +112,8 @@ func TestOpenAtFreshV2(t *testing.T) {
 	}
 	var version int
 	d.sql.QueryRow(`PRAGMA user_version`).Scan(&version)
-	if version != 3 {
-		t.Errorf("user_version = %d, want 3", version)
+	if version != 4 {
+		t.Errorf("user_version = %d, want 4", version)
 	}
 }
 
@@ -137,8 +137,8 @@ func TestOpenUpgradesV1ToV2(t *testing.T) {
 	defer d2.Close()
 	var v int
 	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v)
-	if v != 3 {
-		t.Errorf("user_version after upgrade = %d, want 3", v)
+	if v != 4 {
+		t.Errorf("user_version after upgrade = %d, want 4", v)
 	}
 	var name string
 	if err := d2.sql.QueryRow(`SELECT name FROM sqlite_master WHERE name = 'source_files'`).Scan(&name); err != nil {
@@ -166,8 +166,8 @@ func TestOpenUpgradesLegacyV0ToV2(t *testing.T) {
 	defer d2.Close()
 	var v int
 	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v)
-	if v != 3 {
-		t.Errorf("user_version after v0->v2 upgrade = %d, want 3", v)
+	if v != 4 {
+		t.Errorf("user_version after v0->v2 upgrade = %d, want 4", v)
 	}
 }
 
@@ -179,8 +179,8 @@ func TestOpenAtFreshV3(t *testing.T) {
 	}
 	var version int
 	d.sql.QueryRow(`PRAGMA user_version`).Scan(&version)
-	if version != 3 {
-		t.Errorf("user_version = %d, want 3", version)
+	if version != 4 {
+		t.Errorf("user_version = %d, want 4", version)
 	}
 }
 
@@ -202,8 +202,8 @@ func TestOpenUpgradesV2ToV3(t *testing.T) {
 	defer d2.Close()
 	var v int
 	d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v)
-	if v != 3 {
-		t.Errorf("user_version after upgrade = %d, want 3", v)
+	if v != 4 {
+		t.Errorf("user_version after upgrade = %d, want 4", v)
 	}
 }
 
@@ -449,6 +449,161 @@ func TestInsertEvidenceWithSourceFileID(t *testing.T) {
 	got, _ := d.GetEvidenceForPage(page.ID)
 	if len(got) != 1 || got[0].SourceFileID == nil || *got[0].SourceFileID != sfID {
 		t.Errorf("evidence SourceFileID not round-tripped: %+v", got)
+	}
+}
+
+func TestMigrate_FromFresh_LandsAtV4(t *testing.T) {
+	d := mustOpen(t)
+	var version int
+	if err := d.sql.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("user_version: %v", err)
+	}
+	if version != 4 {
+		t.Errorf("user_version = %d, want 4", version)
+	}
+	var name string
+	if err := d.sql.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='page_update_log'`).Scan(&name); err != nil {
+		t.Errorf("page_update_log table missing: %v", err)
+	}
+}
+
+func TestMigrate_FromV3_AddsPageUpdateLog(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wiki.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := d.sql.Exec(`PRAGMA user_version = 3`); err != nil {
+		t.Fatalf("force v3: %v", err)
+	}
+	// Drop page_update_log if it exists so we test the migration path.
+	d.sql.Exec(`DROP TABLE page_update_log`)
+	d.Close()
+
+	d2, err := Open(path)
+	if err != nil {
+		t.Fatalf("re-open: %v", err)
+	}
+	defer d2.Close()
+	var v int
+	if err := d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		t.Fatalf("user_version: %v", err)
+	}
+	if v != 4 {
+		t.Errorf("user_version after upgrade = %d, want 4", v)
+	}
+	expectedCols := map[string]bool{
+		"id": false, "page_id": false, "source_id": false,
+		"prior_content_hash": false, "new_content_hash": false,
+		"outcome": false, "reason": false,
+		"evidence_added": false, "evidence_removed": false,
+		"created_at": false,
+	}
+	rows, err := d2.sql.Query(`PRAGMA table_info(page_update_log)`)
+	if err != nil {
+		t.Fatalf("table_info: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := expectedCols[name]; ok {
+			expectedCols[name] = true
+		}
+	}
+	for col, found := range expectedCols {
+		if !found {
+			t.Errorf("page_update_log missing column %q", col)
+		}
+	}
+}
+
+func TestMigrate_Idempotent_RerunningOnV4_IsNoop(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wiki.db")
+	d1, err := Open(path)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	d1.Close()
+	d2, err := Open(path)
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	defer d2.Close()
+	var v int
+	if err := d2.sql.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		t.Fatalf("user_version: %v", err)
+	}
+	if v != 4 {
+		t.Errorf("user_version = %d, want 4", v)
+	}
+	var name string
+	if err := d2.sql.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='page_update_log'`).Scan(&name); err != nil {
+		t.Errorf("page_update_log missing on idempotent re-open: %v", err)
+	}
+	// No duplicate indexes — counts must be exactly 1 each.
+	for _, idx := range []string{"idx_page_update_log_page", "idx_page_update_log_source"} {
+		var n int
+		if err := d2.sql.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, idx).Scan(&n); err != nil {
+			t.Fatalf("count index %q: %v", idx, err)
+		}
+		if n != 1 {
+			t.Errorf("index %q count = %d, want 1", idx, n)
+		}
+	}
+}
+
+func TestMigrate_DoesNotAlterPagesEvidenceSourcesSourceFilesChunks(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wiki.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	preserved := []string{"pages", "evidence", "sources", "source_files", "chunks"}
+	before := map[string]string{}
+	for _, tbl := range preserved {
+		var sqlText string
+		if err := d.sql.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, tbl).Scan(&sqlText); err != nil {
+			t.Fatalf("get sqlite_master.sql for %q: %v", tbl, err)
+		}
+		before[tbl] = sqlText
+	}
+	// Force back to v3 (page_update_log doesn't exist yet at this state).
+	d.sql.Exec(`DROP TABLE page_update_log`)
+	d.sql.Exec(`PRAGMA user_version = 3`)
+	d.Close()
+
+	d2, err := Open(path)
+	if err != nil {
+		t.Fatalf("re-open: %v", err)
+	}
+	defer d2.Close()
+	for _, tbl := range preserved {
+		var after string
+		if err := d2.sql.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, tbl).Scan(&after); err != nil {
+			t.Fatalf("get sqlite_master.sql for %q post-upgrade: %v", tbl, err)
+		}
+		if after != before[tbl] {
+			t.Errorf("table %q schema changed across v3->v4 upgrade\nbefore: %s\nafter:  %s", tbl, before[tbl], after)
+		}
+	}
+}
+
+func TestMigrate_PageUpdateLogIndexesExist(t *testing.T) {
+	d := mustOpen(t)
+	for _, idx := range []string{"idx_page_update_log_page", "idx_page_update_log_source"} {
+		var name string
+		if err := d.sql.QueryRow(`SELECT name FROM sqlite_master WHERE type='index' AND name=?`, idx).Scan(&name); err != nil {
+			t.Errorf("index %q missing: %v", idx, err)
+		}
 	}
 }
 

@@ -163,6 +163,44 @@ func (d *DB) migrate() error {
 		}
 	}
 
+	if version < 4 {
+		// Sub-project 6b (v0.6) — additive only.
+		//
+		// page_update_log is the audit trail for the cross-page page-update
+		// pass. One row per candidate per ingest, written even on `failed`
+		// and `skipped` outcomes so a user can run
+		//   sqlite3 .llmwiki/wiki.db "SELECT title, outcome, reason
+		//                             FROM page_update_log
+		//                             JOIN pages ON pages.id = page_update_log.page_id"
+		// to debug. Never rotated, never truncated (Q9). Roll-forward only;
+		// no down-migration script (matches every prior migration).
+		//
+		// No ALTER TABLE on existing tables (Q8). pages, evidence, sources,
+		// source_files, chunks are byte-identical pre/post v4.
+		v4 := []string{
+			`CREATE TABLE IF NOT EXISTS page_update_log (
+				id INTEGER PRIMARY KEY,
+				page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+				source_id INTEGER REFERENCES sources(id) ON DELETE SET NULL,
+				prior_content_hash TEXT NOT NULL,
+				new_content_hash TEXT,
+				outcome TEXT NOT NULL,
+				reason TEXT,
+				evidence_added INTEGER,
+				evidence_removed INTEGER,
+				created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_page_update_log_page ON page_update_log(page_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_page_update_log_source ON page_update_log(source_id)`,
+			`PRAGMA user_version = 4`,
+		}
+		for _, stmt := range v4 {
+			if _, err := d.sql.Exec(stmt); err != nil {
+				return fmt.Errorf("v4 migration %q: %w", stmt[:min(50, len(stmt))], err)
+			}
+		}
+	}
+
 	if _, err := d.sql.Exec(`PRAGMA foreign_keys = ON`); err != nil {
 		return fmt.Errorf("enable foreign_keys: %w", err)
 	}
