@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -792,6 +793,93 @@ func ingestHandler(d Deps) mcpsrv.ToolHandlerFunc {
 			"skipped":                res.Skipped,
 			"retro_linked_pages":     res.RetroLinkedPages,
 			"contradictions_flagged": res.ContradictionsFlagged,
+		})
+	}
+}
+
+// ----- promote_answer ----------------------------------------------------
+//
+// promoteAnswerHandler delegates to wiki.PromoteAnswer — the same
+// callable cmd/promote's runPromote wraps. The MCP surface accepts an
+// absolute answer_path (the agent doesn't share the CLI's answers-dir
+// convention) plus the same PromoteOptions knobs cmd/promote exposes:
+// title (override), rewrite (bool), no_save (bool). The trust property
+// holds at the MCP boundary: a stale answer whose source files have
+// changed since the ask is rejected before any disk write.
+//
+// Return JSON shape on success:
+//
+//	{
+//	  "title":              string,         // resolved page title
+//	  "path":               string,         // absolute on-disk path
+//	  "evidence_quotes":    int,            // surviving validated quotes
+//	  "rewrite_applied":    bool,           // false unless --rewrite + valid
+//	  "retro_linked_pages": []string,       // existing pages now [[wikilinking]] this title
+//	}
+//
+// Structured errors mirror write_page's vocabulary:
+//   - evidence_invalid: every quote failed defensive re-validation;
+//     payload includes a `dropped` array (quote / source_file / reason)
+//     and a hint string. Same shape mcp.write_page returns.
+//   - title_exists: a page with the resolved title already exists;
+//     payload includes existing_path.
+//   - bad_request: missing/invalid arguments.
+//   - promote_failed: any other wiki.PromoteAnswer error.
+
+func promoteAnswerHandler(d Deps) mcpsrv.ToolHandlerFunc {
+	return func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+		answerPath, err := req.RequireString("answer_path")
+		if err != nil {
+			return errorResult("bad_request", err.Error(), nil), nil
+		}
+		opts := wiki.PromoteOptions{
+			Title:   req.GetString("title", ""),
+			Rewrite: req.GetBool("rewrite", false),
+			NoSave:  req.GetBool("no_save", false),
+		}
+
+		wcfg := wiki.IngestSourceConfig{
+			WikiDir:          d.Cfg.WikiDir,
+			RawDir:           d.Cfg.RawDir,
+			RespectGitignore: true,
+		}
+		res, err := wiki.PromoteAnswer(ctx, wcfg, d.DB, d.Client, answerPath, opts)
+		if err != nil {
+			switch {
+			case errors.Is(err, wiki.ErrEvidenceInvalid):
+				dropped := make([]map[string]any, 0, len(res.DroppedQuotes))
+				for _, dq := range res.DroppedQuotes {
+					dropped = append(dropped, map[string]any{
+						"quote":       dq.Quote,
+						"source_file": dq.SourceFile,
+						"reason":      dq.Reason,
+					})
+				}
+				return errorResult("evidence_invalid",
+					"every evidence quote failed defensive re-validation; nothing was written",
+					map[string]any{
+						"dropped": dropped,
+						"hint":    "the source files referenced by this answer have changed since the ask; re-run ask + promote against the current wiki",
+					}), nil
+			case errors.Is(err, wiki.ErrTitleExists):
+				return errorResult("title_exists",
+					fmt.Sprintf("a page titled %q already exists", res.Title),
+					map[string]any{"existing_path": res.Path}), nil
+			default:
+				return errorResult("promote_failed", err.Error(), nil), nil
+			}
+		}
+
+		retro := res.RetroLinkedTitles
+		if retro == nil {
+			retro = []string{}
+		}
+		return jsonResult(map[string]any{
+			"title":              res.Title,
+			"path":               res.Path,
+			"evidence_quotes":    res.EvidenceQuotes,
+			"rewrite_applied":    res.RewriteApplied,
+			"retro_linked_pages": retro,
 		})
 	}
 }

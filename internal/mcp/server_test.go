@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	mcpc "github.com/mark3labs/mcp-go/client"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
+	"github.com/mritunjaysharma394/llmwiki/internal/wiki"
 )
 
 // fakeClient is a minimal llm.Client used by handler tests. Each method
@@ -113,7 +115,7 @@ func callTool(t *testing.T, c *mcpc.Client, name string, args map[string]any) (*
 	return res, ""
 }
 
-func TestNewServer_RegistersAllSixTools(t *testing.T) {
+func TestNewServer_RegistersAllSevenTools(t *testing.T) {
 	deps, cleanup := newTestDeps(t, nil)
 	defer cleanup()
 
@@ -125,7 +127,7 @@ func TestNewServer_RegistersAllSixTools(t *testing.T) {
 		got = append(got, name)
 	}
 	sort.Strings(got)
-	want := []string{"ask", "ingest", "lint", "list_pages", "read_page", "write_page"}
+	want := []string{"ask", "ingest", "lint", "list_pages", "promote_answer", "read_page", "write_page"}
 	if !equalSlices(got, want) {
 		t.Errorf("tool names = %v, want %v", got, want)
 	}
@@ -908,5 +910,248 @@ func TestIngest_ReturnShapeIncludesContradictionsFlagged(t *testing.T) {
 	}
 	if _, ok := got["contradictions_flagged"]; !ok {
 		t.Errorf("response missing contradictions_flagged key (raw=%s)", text)
+	}
+}
+
+// ----- promote_answer tests (Phase F / sub-project 6a) -------------------
+
+// seedPromoteFixture wires a deps-backed source/source_file row matching
+// the on-disk source bytes and writes a saved-answer file (using the same
+// FormatSavedAnswer the CLI's saveAnswer uses) to a temp answers dir.
+// Returns (answerPath, srcPath) so tests can mutate or pre-seed before
+// calling mcp.promote_answer.
+func seedPromoteFixture(t *testing.T, deps Deps, sourceContent, question, answerBody, evidenceQuote string) (string, string) {
+	t.Helper()
+	root := filepath.Dir(deps.Cfg.WikiDir)
+	answersDir := filepath.Join(root, "answers")
+	if err := os.MkdirAll(answersDir, 0755); err != nil {
+		t.Fatalf("mkdir answers: %v", err)
+	}
+	srcPath := filepath.Join(root, "promote-src.md")
+	if err := os.WriteFile(srcPath, []byte(sourceContent), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	srcID, err := deps.DB.UpsertSource(srcPath, "h-promote")
+	if err != nil {
+		t.Fatalf("UpsertSource: %v", err)
+	}
+	if _, err := deps.DB.UpsertSourceFile(db.SourceFile{
+		SourceID:     srcID,
+		RelativePath: filepath.Base(srcPath),
+		ContentHash:  "h-promote",
+		ByteSize:     int64(len(sourceContent)),
+		LineCount:    1,
+	}); err != nil {
+		t.Fatalf("UpsertSourceFile: %v", err)
+	}
+	in := wiki.SavedAnswerInput{
+		Question: question,
+		Answer:   answerBody,
+		Model:    "test-model",
+		Pages: []wiki.Page{{
+			Title: "X",
+			Evidence: []wiki.Evidence{{
+				Quote:          evidenceQuote,
+				LineStart:      2,
+				LineEnd:        2,
+				SourceFilePath: filepath.Base(srcPath),
+			}},
+		}},
+		At: time.Date(2026, 5, 4, 15, 2, 8, 0, time.UTC),
+	}
+	body := wiki.FormatSavedAnswer(in)
+	answerPath := filepath.Join(answersDir, "2026-05-04-150208-test.md")
+	if err := os.WriteFile(answerPath, []byte(body), 0644); err != nil {
+		t.Fatalf("write answer: %v", err)
+	}
+	return answerPath, srcPath
+}
+
+// TestPromoteAnswer_ToolRegistered asserts the tool appears in
+// srv.ListTools() and serverVersion bumps to 1.2.0.
+func TestPromoteAnswer_ToolRegistered(t *testing.T) {
+	deps, cleanup := newTestDeps(t, nil)
+	defer cleanup()
+
+	srv := NewServer(deps)
+	tools := srv.ListTools()
+	if _, ok := tools["promote_answer"]; !ok {
+		got := make([]string, 0, len(tools))
+		for n := range tools {
+			got = append(got, n)
+		}
+		sort.Strings(got)
+		t.Fatalf("promote_answer not registered; tools=%v", got)
+	}
+	if serverVersion != "1.2.0" {
+		t.Errorf("serverVersion = %q, want %q", serverVersion, "1.2.0")
+	}
+}
+
+// TestPromoteAnswer_HappyPath wires a real on-disk source + answer file,
+// then calls mcp.promote_answer with the absolute answer_path. The
+// response should expose title/path/evidence_quotes/rewrite_applied/
+// retro_linked_pages keys, and the page should land on disk.
+func TestPromoteAnswer_HappyPath(t *testing.T) {
+	deps, cleanup := newTestDeps(t, nil)
+	defer cleanup()
+	if err := os.MkdirAll(deps.Cfg.WikiDir, 0755); err != nil {
+		t.Fatalf("mkdir wiki: %v", err)
+	}
+
+	source := "Line one of source.\nthe validator drops unverified quotes\nLine three.\n"
+	answerPath, _ := seedPromoteFixture(t, deps,
+		source,
+		"how does the validator work?",
+		"The validator drops unverified quotes before write.",
+		"the validator drops unverified quotes",
+	)
+
+	srv := NewServer(deps)
+	c, done := connect(t, srv)
+	defer done()
+
+	res, text := callTool(t, c, "promote_answer", map[string]any{
+		"answer_path": answerPath,
+		"title":       "Validator Internals",
+	})
+	if res.IsError {
+		t.Fatalf("expected success; got IsError=true, raw=%s", text)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("unmarshal: %v\nraw=%s", err, text)
+	}
+	if got["title"] != "Validator Internals" {
+		t.Errorf("title = %v, want Validator Internals", got["title"])
+	}
+	if got["path"] == nil || got["path"].(string) == "" {
+		t.Errorf("path empty; raw=%s", text)
+	}
+	evq, _ := got["evidence_quotes"].(float64)
+	if int(evq) != 1 {
+		t.Errorf("evidence_quotes = %v, want 1", got["evidence_quotes"])
+	}
+	if got["rewrite_applied"] != false {
+		t.Errorf("rewrite_applied = %v, want false", got["rewrite_applied"])
+	}
+	if _, ok := got["retro_linked_pages"]; !ok {
+		t.Errorf("response missing retro_linked_pages key; raw=%s", text)
+	}
+
+	// Page on disk + DB.
+	pagePath := filepath.Join(deps.Cfg.WikiDir, "Validator Internals.md")
+	if _, err := os.Stat(pagePath); err != nil {
+		t.Errorf("page not on disk at %s: %v", pagePath, err)
+	}
+	if p, _ := deps.DB.GetPage("Validator Internals"); p == nil {
+		t.Errorf("DB row missing for Validator Internals")
+	}
+}
+
+// TestPromoteAnswer_StaleEvidence mutates the source file between
+// answer-write and promote so the quote no longer substring-matches; the
+// handler should return a structured evidence_invalid error with a
+// dropped-quotes payload.
+func TestPromoteAnswer_StaleEvidence(t *testing.T) {
+	deps, cleanup := newTestDeps(t, nil)
+	defer cleanup()
+	if err := os.MkdirAll(deps.Cfg.WikiDir, 0755); err != nil {
+		t.Fatalf("mkdir wiki: %v", err)
+	}
+
+	source := "Line one.\nthe validator drops unverified quotes\nLine three.\n"
+	answerPath, srcPath := seedPromoteFixture(t, deps,
+		source,
+		"stale check?",
+		"verbatim",
+		"the validator drops unverified quotes",
+	)
+
+	// Mutate the source so the quote no longer substring-matches.
+	if err := os.WriteFile(srcPath, []byte("totally different content\n"), 0644); err != nil {
+		t.Fatalf("rewrite source: %v", err)
+	}
+
+	srv := NewServer(deps)
+	c, done := connect(t, srv)
+	defer done()
+
+	res, text := callTool(t, c, "promote_answer", map[string]any{
+		"answer_path": answerPath,
+		"title":       "Stale Page",
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError=true; raw=%s", text)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("error payload not JSON: %v\nraw=%s", err, text)
+	}
+	if got["code"] != "evidence_invalid" {
+		t.Errorf("code = %v, want evidence_invalid", got["code"])
+	}
+	if _, ok := got["dropped"]; !ok {
+		t.Errorf("missing dropped field; raw=%s", text)
+	}
+	dropped, _ := got["dropped"].([]any)
+	if len(dropped) == 0 {
+		t.Errorf("dropped empty; want at least one entry")
+	}
+
+	// No disk write.
+	if _, err := os.Stat(filepath.Join(deps.Cfg.WikiDir, "Stale Page.md")); err == nil {
+		t.Error("page should NOT be on disk after evidence_invalid")
+	}
+}
+
+// TestPromoteAnswer_TitleCollision pre-seeds an existing page with the
+// target title; the handler should return a structured title_exists.
+func TestPromoteAnswer_TitleCollision(t *testing.T) {
+	deps, cleanup := newTestDeps(t, nil)
+	defer cleanup()
+	if err := os.MkdirAll(deps.Cfg.WikiDir, 0755); err != nil {
+		t.Fatalf("mkdir wiki: %v", err)
+	}
+
+	source := "alpha\nthe validator drops unverified quotes\ngamma\n"
+	answerPath, _ := seedPromoteFixture(t, deps,
+		source,
+		"title collision check?",
+		"verbatim",
+		"the validator drops unverified quotes",
+	)
+
+	// Pre-seed colliding page.
+	preExistingPath := filepath.Join(deps.Cfg.WikiDir, "Validator Internals.md")
+	if err := os.WriteFile(preExistingPath, []byte("---\ntitle: Validator Internals\n---\nseed body\n"), 0644); err != nil {
+		t.Fatalf("seed page: %v", err)
+	}
+	if err := deps.DB.UpsertPage(db.PageRecord{
+		Title: "Validator Internals", Path: preExistingPath, Body: "seed body", ContentHash: "h-seed",
+	}); err != nil {
+		t.Fatalf("seed UpsertPage: %v", err)
+	}
+
+	srv := NewServer(deps)
+	c, done := connect(t, srv)
+	defer done()
+
+	res, text := callTool(t, c, "promote_answer", map[string]any{
+		"answer_path": answerPath,
+		"title":       "Validator Internals",
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError=true; raw=%s", text)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("error payload not JSON: %v\nraw=%s", err, text)
+	}
+	if got["code"] != "title_exists" {
+		t.Errorf("code = %v, want title_exists", got["code"])
+	}
+	if got["existing_path"] != preExistingPath {
+		t.Errorf("existing_path = %v, want %s", got["existing_path"], preExistingPath)
 	}
 }

@@ -1,5 +1,5 @@
 // Package mcp wraps github.com/mark3labs/mcp-go's MCPServer and registers
-// llmwiki's six tools by name. Handlers are thin adapters over internal/db,
+// llmwiki's seven tools by name. Handlers are thin adapters over internal/db,
 // internal/wiki, and the configured llm.Client; structured errors flow back
 // to clients as JSON-encoded {code, message, ...} payloads.
 package mcp
@@ -34,12 +34,13 @@ type Deps struct {
 
 const (
 	serverName    = "llmwiki"
-	serverVersion = "1.1.0"
+	serverVersion = "1.2.0" // bumped from 1.1.0 for sub-project 6a (promote_answer + return-shape extensions)
 )
 
-// NewServer registers all six tools — four read-only (list_pages, read_page,
-// lint, ask) implemented in this commit and two write-side (write_page,
-// ingest) wired as "not yet implemented" stubs that Phase G2 replaces.
+// NewServer registers all seven tools — four read-only (list_pages, read_page,
+// lint, ask) and three write-side (write_page, ingest, promote_answer). The
+// promote_answer tool was added in sub-project 6a and mirrors
+// wiki.PromoteAnswer's defensive re-validation contract.
 func NewServer(d Deps) *mcpsrv.MCPServer {
 	s := mcpsrv.NewMCPServer(serverName, serverVersion)
 	s.AddTool(listPagesTool(), listPagesHandler(d))
@@ -48,6 +49,7 @@ func NewServer(d Deps) *mcpsrv.MCPServer {
 	s.AddTool(askTool(), askHandler(d))
 	s.AddTool(writePageTool(), writePageHandler(d))
 	s.AddTool(ingestTool(), ingestHandler(d))
+	s.AddTool(promoteAnswerTool(), promoteAnswerHandler(d))
 	return s
 }
 
@@ -144,5 +146,38 @@ func ingestTool() mcpgo.Tool {
 		mcpgo.WithBoolean("feed", mcpgo.Description("Force feed-parser dispatch (RSS / Atom / JSON Feed).")),
 		mcpgo.WithBoolean("sitemap", mcpgo.Description("Force sitemap dispatch.")),
 		mcpgo.WithNumber("max_pages", mcpgo.Description("Cap on feed entries / sitemap pages.")),
+	)
+}
+
+// promoteAnswerTool lifts a saved answer (.llmwiki/answers/<ts>-<slug>.md)
+// into a real wiki page. Defensive re-validation runs every parsed
+// evidence quote through ValidateAndAttachEvidence — the same byte-exact
+// substring-match validator that gates write_page — against the current
+// on-disk source bytes. Quotes whose source files have changed since the
+// ask are rejected with code: "evidence_invalid"; title collisions
+// return code: "title_exists". The trust property holds at the MCP
+// boundary: a stale answer never reaches disk.
+//
+// Inputs differ from cmd/promote.go in one way: MCP accepts only an
+// absolute answer_path (the agent doesn't share the CLI's answers-dir
+// convention). title / rewrite / no_save mirror PromoteOptions exactly.
+func promoteAnswerTool() mcpgo.Tool {
+	return mcpgo.NewTool(
+		"promote_answer",
+		mcpgo.WithDescription(
+			"Promote a saved answer file into a real wiki page. Defensive "+
+				"re-validation runs every evidence quote through the same byte-exact "+
+				"substring-match validator that gates write_page; quotes whose source "+
+				"files have changed since the ask are rejected with code: "+
+				"\"evidence_invalid\". Title collisions return code: \"title_exists\"."),
+		mcpgo.WithString("answer_path",
+			mcpgo.Description("Absolute path to the saved-answer file."),
+			mcpgo.Required()),
+		mcpgo.WithString("title",
+			mcpgo.Description("Override page title; defaults to Title-Cased question.")),
+		mcpgo.WithBoolean("rewrite",
+			mcpgo.Description("LLM-rewrite the answer body into wiki prose; default false. The rewrite must preserve every evidence quote verbatim or it falls back to the verbatim body.")),
+		mcpgo.WithBoolean("no_save",
+			mcpgo.Description("Skip appending a **promote** line to log.md; default false. Debug-only.")),
 	)
 }
