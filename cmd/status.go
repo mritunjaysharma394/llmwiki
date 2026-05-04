@@ -37,6 +37,28 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("pages update failed: %d\n", failed)
 		}
 	}
+	// Phase H / Task 13: schema: line — surfaces the active doc's
+	// filename ("AGENTS.md" / "CLAUDE.md" / "bundled (no AGENTS.md or
+	// CLAUDE.md)") + 8-char hash prefix + drift counter. The
+	// activeSchema global is set by cmd/root.go's loadConfig (or
+	// loadSchemaSoft for `schema` subcommands); DocPath == "" means we
+	// fell back to schema.Bundled() because neither AGENTS.md nor
+	// CLAUDE.md was present at the wiki root.
+	current, prior, err := database.CountPagesByHashState(activeSchema.Hash())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  WARN reading schema_hash counters: %v\n", err)
+	} else {
+		label := activeSchema.DocPath
+		if label == "" {
+			label = "bundled (no AGENTS.md or CLAUDE.md)"
+		}
+		active8 := activeSchema.Hash()[:8]
+		if prior > 0 {
+			fmt.Printf("schema:             %s (hash %s..., %d pages on prior hash)\n", label, active8, prior)
+		} else {
+			fmt.Printf("schema:             %s (hash %s..., %d pages on active hash)\n", label, active8, current)
+		}
+	}
 	for _, ls := range stats.LargestSources {
 		fmt.Printf("largest source:     %s (%d files)\n", ls.URI, ls.FileCount)
 	}
