@@ -165,10 +165,20 @@ var rootCmd = &cobra.Command{
 		// could not reach `schema validate` to find out *why* it was
 		// malformed. Take the soft path: load activeSchema via
 		// schema.Load (no Validate call), so the subcommand can render
-		// the structured error itself. We also skip database open and
-		// provider selection — `schema show` and `schema validate`
-		// don't need either.
+		// the structured error itself.
+		//
+		// `schema migrate` is the one schema subcommand that DOES need
+		// a real DB + LLM client (it walks pages and re-runs ingest);
+		// for that variant we load the full config but tolerate a
+		// schema that fails the strict Validate check by routing
+		// through loadSchemaSoft anyway — the migrate path can run
+		// against a parse-clean but Validate-failing schema if the user
+		// edited AGENTS.md to a state the validator dislikes but the
+		// parser still accepts.
 		if cmd.Parent() != nil && cmd.Parent().Name() == "schema" {
+			if cmd.Name() == "migrate" {
+				return loadSchemaSoftWithDB()
+			}
 			return loadSchemaSoft()
 		}
 		return loadConfig()
@@ -207,6 +217,96 @@ func loadSchemaSoft() error {
 			"the file is structurally malformed (frontmatter / section split). Fix the listed problem and re-run.")
 	}
 	activeSchema = sch
+	return nil
+}
+
+// loadSchemaSoftWithDB is the `schema migrate` flavour of
+// loadSchemaSoft: it parses AGENTS.md / CLAUDE.md without running the
+// strict Validate check (so a user with a Validate-failing-but-parse-
+// clean schema can still re-run migrate against the prior bytes), AND
+// opens the database + selects the LLM client the migrate path needs.
+//
+// Mirrors loadConfig's database/provider selection block. Kept as a
+// sibling helper so the show / validate variants stay zero-DB and the
+// dispatch in PersistentPreRunE remains a single switch on cmd.Name().
+func loadSchemaSoftWithDB() error {
+	if err := loadSchemaSoft(); err != nil {
+		return err
+	}
+	cfg = &Config{}
+	if _, err := toml.DecodeFile(".llmwiki/config.toml", cfg); err != nil {
+		return fmt.Errorf("config not found — run 'llmwiki init' first: %w", err)
+	}
+	if overrideProvider != "" {
+		cfg.LLM.Provider = overrideProvider
+	}
+	if overrideModel != "" {
+		cfg.LLM.Model = overrideModel
+	}
+	applyProviderDefaults(cfg)
+	if cfg.LLM.OllamaURL == "" {
+		cfg.LLM.OllamaURL = cfg.Providers.Ollama.URL
+	}
+	applyIngestDefaults(&cfg.Ingest)
+	var err error
+	database, err = db.Open(cfg.Wiki.DBPath)
+	if err != nil {
+		return cliutil.Wrap("opening database",
+			err,
+			"if the schema is newer than this binary, downgrade is not supported; back up .llmwiki/wiki.db and re-init")
+	}
+	switch cfg.LLM.Provider {
+	case "gemini":
+		if os.Getenv("GEMINI_API_KEY") == "" {
+			return cliutil.Wrap(
+				"GEMINI_API_KEY is not set",
+				nil,
+				"get a free key at https://aistudio.google.com/apikey, then export GEMINI_API_KEY=...; or use --provider anthropic / openai-compatible / ollama",
+			)
+		}
+		llmClient = llm.NewGeminiClient(cfg.LLM.Model)
+	case "anthropic", "":
+		if os.Getenv("ANTHROPIC_API_KEY") == "" {
+			return cliutil.Wrap(
+				"ANTHROPIC_API_KEY is not set",
+				nil,
+				"export ANTHROPIC_API_KEY=sk-ant-... (get one at https://console.anthropic.com/settings/keys), or use --provider gemini / ollama",
+			)
+		}
+		llmClient = llm.NewAnthropicClient(cfg.LLM.Model)
+	case "openai-compatible":
+		keyEnv := cfg.Providers.OpenAICompat.APIKeyEnv
+		if keyEnv == "" {
+			keyEnv = "OPENAI_COMPAT_API_KEY"
+		}
+		if os.Getenv(keyEnv) == "" {
+			return cliutil.Wrap(
+				fmt.Sprintf("%s is not set", keyEnv),
+				nil,
+				"set the env var named in [providers.openai_compat].api_key_env (default OPENAI_COMPAT_API_KEY), or use --provider gemini",
+			)
+		}
+		if cfg.Providers.OpenAICompat.BaseURL == "" {
+			return cliutil.Wrap(
+				"[providers.openai_compat].base_url is empty",
+				nil,
+				"set base_url to e.g. https://openrouter.ai/api/v1, https://api.groq.com/openai/v1, https://api.together.xyz/v1, https://api.cerebras.ai/v1, or https://api.mistral.ai/v1",
+			)
+		}
+		llmClient = llm.NewOpenAICompatClient(
+			cfg.Providers.OpenAICompat.BaseURL,
+			os.Getenv(keyEnv),
+			cfg.LLM.Model,
+		)
+	case "ollama":
+		llmClient = llm.NewOllamaClient(cfg.LLM.Model, cfg.LLM.OllamaURL)
+	default:
+		return fmt.Errorf("unknown provider %q", cfg.LLM.Provider)
+	}
+	if name := os.Getenv("LLMWIKI_CASSETTE"); name != "" {
+		dir := "internal/llm/testdata/cassettes"
+		llmClient = llm.NewCassetteClient(llmClient, dir, name, llm.ModeReplay)
+	}
 	return nil
 }
 
