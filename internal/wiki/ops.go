@@ -337,17 +337,36 @@ func toSlice(v any) ([]any, bool) {
 	return nil, false
 }
 
+// lintContradictionsSystemPrompt is the whole-wiki batched lint prompt
+// used by `llmwiki lint`. Lifted into a const (Phase B Task 4) so the
+// byte-equality test can pin it; production reads now flow through
+// schema.Bundled().Render in Task 5.
+const lintContradictionsSystemPrompt = `You are a wiki consistency checker. Identify factual contradictions between wiki pages.
+List each contradiction as: "Page A vs Page B: <description>". If no contradictions, say "No contradictions found."`
+
 func DetectContradictions(ctx context.Context, client llm.Client, pages []Page) (string, error) {
 	if len(pages) < 2 {
 		return "", nil
 	}
-	system := `You are a wiki consistency checker. Identify factual contradictions between wiki pages.
-List each contradiction as: "Page A vs Page B: <description>". If no contradictions, say "No contradictions found."`
-
 	var sb strings.Builder
 	for _, p := range pages {
 		sb.WriteString(fmt.Sprintf("## %s\n\n%s\n\n---\n\n", p.Title, p.Body))
 	}
 
-	return client.Complete(ctx, system, sb.String())
+	return client.Complete(ctx, lintContradictionsSystemPrompt, sb.String())
 }
+
+// IngestSystemPromptForTests exposes the v0.6 hard-coded ingest system
+// prompt for internal/schema's byte-equality test. Removed in v0.8 once
+// the schema-driven path is the only path.
+func IngestSystemPromptForTests() string { return ingestSystemPrompt }
+
+// AnswerSystemPromptForTests exposes the v0.6 hard-coded answer system
+// prompt for internal/schema's byte-equality test.
+func AnswerSystemPromptForTests() string { return answerSystemPrompt }
+
+// LintContradictionsSystemPromptForTests exposes the v0.6 inline lint
+// contradictions prompt (originally inline inside DetectContradictions;
+// hoisted to a const in Phase B Task 4) for internal/schema's
+// byte-equality test.
+func LintContradictionsSystemPromptForTests() string { return lintContradictionsSystemPrompt }

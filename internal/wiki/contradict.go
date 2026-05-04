@@ -83,6 +83,12 @@ Quote each side VERBATIM from the evidence list shown. If you would need to para
 
 If there are no contradictions, output the empty array: [].`
 
+// ContradictionSystemPromptForTests exposes the v0.6 hard-coded
+// per-pair contradiction system prompt for internal/schema's
+// byte-equality test. Removed in v0.8 once the schema-driven path is
+// the only path.
+func ContradictionSystemPromptForTests() string { return contradictionSystemPrompt }
+
 // DetectIngestContradictions builds candidate (newPage, existingPage)
 // pairs by FTS-search over each newPage's body, runs one LLM call per
 // pair against the configured client (caller passes cfg.LLM.Model's

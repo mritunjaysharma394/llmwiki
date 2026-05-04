@@ -45,6 +45,11 @@ quotes (those are listed under EXISTING EVIDENCE). Do not invent
 quotes. If NEW SOURCE does not actually update this page, respond
 with {"pages": []} and we will keep the page unchanged.`
 
+// UpdateExistingSystemPromptForTests exposes the v0.6 hard-coded
+// update-existing system prompt for internal/schema's byte-equality
+// test. Removed in v0.8 once the schema-driven path is the only path.
+func UpdateExistingSystemPromptForTests() string { return updateExistingSystemPrompt }
+
 // UpdateExistingOptions captures the per-call knobs that map onto the
 // `--update-existing-*` flag surface (Phase D will wire those in).
 //

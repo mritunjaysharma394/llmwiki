@@ -318,8 +318,13 @@ func TestBundled_Parses_NoError(t *testing.T) {
 	if s.Version != 1 {
 		t.Errorf("Bundled().Version = %d, want 1", s.Version)
 	}
-	if s.Domain == "" {
-		t.Error("Bundled().Domain empty")
+	// Bundled().Domain is intentionally empty in v0.7: the byte-equality
+	// contract requires {{domain}} to substitute to zero bytes so the
+	// rendered prompts match v0.6 verbatim. Users editing AGENTS.md set
+	// a domain by replacing the empty Domain section. See
+	// byte_equality_test.go for the load-bearing contract.
+	if s.Domain != "" {
+		t.Errorf("Bundled().Domain = %q, want empty (byte-equality contract)", s.Domain)
 	}
 	if len(s.Ontology.Fields) == 0 {
 		t.Error("Bundled().Ontology.Fields empty")

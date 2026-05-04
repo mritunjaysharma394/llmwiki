@@ -464,11 +464,11 @@ func simpleSlugify(s string) string {
 	return out
 }
 
-// rewritePromoteBody asks the LLM for a wiki-prose rewrite of the answer
-// body, gently nudged to keep every evidence quote intact. Returns the
-// raw rewritten string; the caller validates and falls back on failure.
-func rewritePromoteBody(ctx context.Context, client llm.Client, question, body string, ev []Evidence) (string, error) {
-	system := `You rewrite an LLM-generated answer into a polished wiki page body.
+// promoteRewriteSystemPrompt is the v0.6 inline rewrite system prompt
+// hoisted to a const (Phase B Task 4) so the byte-equality test can
+// pin it; production reads now flow through schema.Bundled().Render
+// in Task 5.
+const promoteRewriteSystemPrompt = `You rewrite an LLM-generated answer into a polished wiki page body.
 
 Preserve every verbatim source quote that appears in the input verbatim — they are
 the load-bearing evidence the wiki's trust validator will re-check. You may
@@ -476,6 +476,16 @@ restructure prose, add headings, and tighten paragraphs; you may NOT alter,
 shorten, or paraphrase any quoted span.
 
 Return Markdown only — no preamble, no closing remarks, just the page body.`
+
+// PromoteRewriteSystemPromptForTests exposes the v0.6 rewrite system
+// prompt for internal/schema's byte-equality test. Removed in v0.8 once
+// the schema-driven path is the only path.
+func PromoteRewriteSystemPromptForTests() string { return promoteRewriteSystemPrompt }
+
+// rewritePromoteBody asks the LLM for a wiki-prose rewrite of the answer
+// body, gently nudged to keep every evidence quote intact. Returns the
+// raw rewritten string; the caller validates and falls back on failure.
+func rewritePromoteBody(ctx context.Context, client llm.Client, question, body string, ev []Evidence) (string, error) {
 	var sb strings.Builder
 	sb.WriteString("Question:\n")
 	sb.WriteString(question)
@@ -485,7 +495,7 @@ Return Markdown only — no preamble, no closing remarks, just the page body.`
 	for _, e := range ev {
 		sb.WriteString(fmt.Sprintf("- %q\n", e.Quote))
 	}
-	return client.Complete(ctx, system, sb.String())
+	return client.Complete(ctx, promoteRewriteSystemPrompt, sb.String())
 }
 
 // rewriteEvidencesValid checks that every parsed quote still appears

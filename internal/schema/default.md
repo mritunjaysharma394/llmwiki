@@ -7,7 +7,8 @@ generator: llmwiki
 
 This document defines how `llmwiki` shapes pages and prompts the LLM.
 It is YOUR document — edit it to fit your domain. The bundled defaults
-match `v0.7.0-rc.1`'s behaviour.
+match `v0.7.0-rc.1`'s behaviour byte-for-byte: a v0.6 wiki opening under
+v0.7 with no AGENTS.md sees zero behaviour change.
 
 The trust property is bundled and not configurable here: every evidence
 quote on disk substring-matches its named source file, byte-for-byte.
@@ -16,7 +17,7 @@ This document controls what the LLM is *asked* and how the page is
 
 ## Domain
 
-A general-purpose wiki. Pages capture concepts, components, decisions, and the relationships between them.
+
 
 ## Page ontology
 
@@ -35,11 +36,6 @@ A general-purpose wiki. Pages capture concepts, components, decisions, and the r
 
 You write wiki pages strictly grounded in the SOURCE provided.
 
-Domain context: {{domain}}
-
-Existing wiki pages (titles only):
-{{existing_titles}}
-
 The SOURCE may contain multiple files, each delimited by a header line:
     === path/to/file.ext ===
 For every evidence quote, set "source_file" to the exact path shown in the
@@ -53,41 +49,32 @@ RULES:
 4. If SOURCE doesn't contain enough material for a high-quality page on a topic, do NOT create that page.
 5. Better to return one solid page than five thin ones. Aim for 1-4 pages per call.
 6. Page bodies should synthesize and organize, but every claim must be defensible from the evidence quotes you provide.
-7. When linking pages, only reference existing pages or pages you are creating in this same call.
+7. When linking pages, only reference existing pages or pages you are creating in this same call.{{domain}}
+
+Existing wiki pages (titles only):
+{{existing_titles}}
 
 ## Update-existing prompt
 
 You update an EXISTING wiki page in light of a NEW SOURCE.
-
-Domain context: {{domain}}
-
-EXISTING PAGE BODY:
-{{existing_page_body}}
-
-EXISTING EVIDENCE:
-{{existing_evidence}}
-
 Output a single page with the same title; the body should incorporate
 information from NEW SOURCE that refines, qualifies, or extends the
 existing page. Every evidence quote must verbatim-substring-match
 either the NEW SOURCE files OR the existing page's already-validated
 quotes (those are listed under EXISTING EVIDENCE). Do not invent
 quotes. If NEW SOURCE does not actually update this page, respond
-with {"pages": []} and we will keep the page unchanged.
+with {"pages": []} and we will keep the page unchanged.{{domain}}{{existing_page_body}}{{existing_evidence}}
 
 ## Ask prompt
 
 You answer using the provided wiki pages and source quotes.
-
-Domain context: {{domain}}
-
 Cite pages inline using [Page Title] notation.
 When using a verbatim quote from a source, render it as a markdown blockquote and label it as (file:lines), e.g.:
 > "channels block when full" (internal/sync/chan.go:4-4)
 For PDF pages the file becomes "page-N":
 > "the answer is 42" (page-3:2-2)
 
-If pages and quotes are insufficient, say so plainly. Do not fabricate.
+If pages and quotes are insufficient, say so plainly. Do not fabricate.{{domain}}
 
 ## Contradiction prompt
 
@@ -109,21 +96,12 @@ If there are no contradictions, output the empty array: [].
 
 You rewrite an LLM-generated answer into a polished wiki page body.
 
-Question:
-{{question}}
-
-Answer body:
-{{answer_body}}
-
-Verbatim quotes that must survive verbatim in your rewrite:
-{{evidence_quotes}}
-
 Preserve every verbatim source quote that appears in the input verbatim — they are
 the load-bearing evidence the wiki's trust validator will re-check. You may
 restructure prose, add headings, and tighten paragraphs; you may NOT alter,
 shorten, or paraphrase any quoted span.
 
-Return Markdown only — no preamble, no closing remarks, just the page body.
+Return Markdown only — no preamble, no closing remarks, just the page body.{{question}}{{answer_body}}{{evidence_quotes}}
 
 ## Lint contradictions prompt
 
