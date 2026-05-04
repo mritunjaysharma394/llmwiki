@@ -183,6 +183,125 @@ func rewriteOutsideBackticks(s string, patterns []*regexp.Regexp, titles []strin
 	return s
 }
 
+// FindBareReferences returns the distinct knownTitles that appear in
+// `body` as bare prose mentions — i.e. the same hits
+// RewriteBareReferencesAsWikilinks would wrap. A title that does not
+// appear, or that only appears already wrapped in [[...]], is omitted.
+//
+// Sub-project 8 / Phase A — FastLint's "missing cross-ref scan" reuses
+// this primitive instead of duplicating the fence/frontmatter/backtick
+// parsing. The semantics are identical to the rewriter (case-sensitive,
+// whole-word, fence/backtick/frontmatter-aware, longer-first); the
+// only difference is the return shape.
+//
+// Order: titles surface in the same longest-first sweep the rewriter
+// uses (SliceStable keyed by descending length). De-duplication keeps
+// the first occurrence per title.
+func FindBareReferences(body string, knownTitles []string) []string {
+	if len(knownTitles) == 0 || body == "" {
+		return nil
+	}
+	titles := make([]string, len(knownTitles))
+	copy(titles, knownTitles)
+	sort.SliceStable(titles, func(i, j int) bool {
+		if len(titles[i]) != len(titles[j]) {
+			return len(titles[i]) > len(titles[j])
+		}
+		return titles[i] < titles[j]
+	})
+
+	patterns := make([]*regexp.Regexp, 0, len(titles))
+	keep := make([]string, 0, len(titles))
+	for _, t := range titles {
+		if t == "" {
+			continue
+		}
+		re, err := regexp.Compile(`\b` + regexp.QuoteMeta(t) + `\b`)
+		if err != nil {
+			continue
+		}
+		patterns = append(patterns, re)
+		keep = append(keep, t)
+	}
+	if len(patterns) == 0 {
+		return nil
+	}
+
+	lines := strings.Split(body, "\n")
+	inFence := false
+	inFrontmatter := false
+	if len(lines) > 0 && lines[0] == "---" {
+		inFrontmatter = true
+	}
+	hits := map[string]bool{}
+	for i, ln := range lines {
+		if inFrontmatter {
+			if i > 0 && ln == "---" {
+				inFrontmatter = false
+			}
+			continue
+		}
+		trim := strings.TrimSpace(ln)
+		if strings.HasPrefix(trim, "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
+		findReferencesInLine(ln, patterns, keep, hits)
+	}
+	if len(hits) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(hits))
+	// Preserve longest-first order from `keep` for determinism.
+	for _, t := range keep {
+		if hits[t] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// findReferencesInLine mirrors rewriteLine's masking logic but records
+// hits into the shared `hits` map instead of producing a new string.
+// Even-indexed segments (split on backticks) are out-of-backticks; only
+// those are scanned.
+func findReferencesInLine(line string, patterns []*regexp.Regexp, titles []string, hits map[string]bool) {
+	if !strings.ContainsAny(line, "`") {
+		findReferencesOutsideBackticks(line, patterns, titles, hits)
+		return
+	}
+	parts := strings.Split(line, "`")
+	for i := range parts {
+		if i%2 == 0 {
+			findReferencesOutsideBackticks(parts[i], patterns, titles, hits)
+		}
+	}
+}
+
+// findReferencesOutsideBackticks records into `hits` every title whose
+// pattern matches `s` outside any existing [[...]] wikilink. Mirrors
+// rewriteOutsideBackticks's match-walking with insideWikilink filtering.
+func findReferencesOutsideBackticks(s string, patterns []*regexp.Regexp, titles []string, hits map[string]bool) {
+	for i, re := range patterns {
+		title := titles[i]
+		if hits[title] {
+			continue
+		}
+		idxs := re.FindAllStringIndex(s, -1)
+		for _, idx := range idxs {
+			start, end := idx[0], idx[1]
+			if insideWikilink(s, start, end) {
+				continue
+			}
+			hits[title] = true
+			break
+		}
+	}
+}
+
 // insideWikilink reports whether the byte span [start,end) of s lies
 // inside an existing [[...]] wikilink. True when the most recent "[["
 // before `start` is not already closed by a "]]" before `start`, AND a
