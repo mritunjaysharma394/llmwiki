@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -520,7 +519,7 @@ func writePageHandler(d Deps) mcpsrv.ToolHandlerFunc {
 			if _, dup := fileSet[in.SourceFile]; dup {
 				continue
 			}
-			content, err := readSourceFileContent(ref.sourceURI, ref.file.RelativePath)
+			content, err := wiki.ReadSourceFileContent(ref.sourceURI, ref.file.RelativePath)
 			if err != nil {
 				return errorResult("source_not_readable",
 					fmt.Sprintf("cannot read source_file %q from source %q: %v", in.SourceFile, ref.sourceURI, err),
@@ -733,28 +732,10 @@ func writePageHandler(d Deps) mcpsrv.ToolHandlerFunc {
 	}
 }
 
-// readSourceFileContent reads the bytes of source_file <relPath> living
-// under <sourceURI>. For local paths it reads sourceURI as a file (when
-// relPath == basename of sourceURI) or sourceURI/relPath (when sourceURI
-// is a directory). HTTP/HTTPS URIs return an error — v1.1's MCP
-// write_page assumes the source still resolves to local content; the
-// agent should re-ingest the URL first if the original bytes aren't
-// retained on disk.
-func readSourceFileContent(sourceURI, relPath string) ([]byte, error) {
-	// If sourceURI itself is a file and relPath ends up matching it,
-	// just read sourceURI directly.
-	if data, err := os.ReadFile(sourceURI); err == nil {
-		return data, nil
-	}
-	candidate := filepath.Join(sourceURI, relPath)
-	if data, err := os.ReadFile(candidate); err == nil {
-		return data, nil
-	}
-	if strings.HasPrefix(sourceURI, "http://") || strings.HasPrefix(sourceURI, "https://") {
-		return nil, fmt.Errorf("HTTP source — re-ingest before write_page")
-	}
-	return nil, fmt.Errorf("not found at %q or %q", sourceURI, filepath.Join(sourceURI, relPath))
-}
+// readSourceFileContent moved to internal/wiki/promote.go (v1.2 phase B,
+// task 2). Both this handler and wiki.PromoteAnswer share the same
+// implementation; the wiki package owns it because internal/mcp already
+// imports internal/wiki and the reverse would form a cycle.
 
 // ----- ingest -------------------------------------------------------------
 //
