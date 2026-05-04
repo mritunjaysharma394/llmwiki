@@ -394,6 +394,101 @@ func TestLoad_ParsesAGENTSMdWhenPresent(t *testing.T) {
 	}
 }
 
+// ---------- Phase A.2: AGENTS.md / CLAUDE.md fallback discovery ----------
+
+func TestSchemaFilenames_OrderIsAGENTSThenCLAUDE(t *testing.T) {
+	if len(SchemaFilenames) != 2 {
+		t.Fatalf("len(SchemaFilenames) = %d, want 2", len(SchemaFilenames))
+	}
+	if SchemaFilenames[0] != "AGENTS.md" {
+		t.Errorf("SchemaFilenames[0] = %q, want %q", SchemaFilenames[0], "AGENTS.md")
+	}
+	if SchemaFilenames[1] != "CLAUDE.md" {
+		t.Errorf("SchemaFilenames[1] = %q, want %q", SchemaFilenames[1], "CLAUDE.md")
+	}
+}
+
+func TestLoad_FallsBackToCLAUDEMd_WhenAGENTSMdAbsent(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "CLAUDE.md")
+	if err := os.WriteFile(path, []byte(fixtureAllSections), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	s, err := Load(tmp)
+	if err != nil {
+		t.Fatalf("Load: unexpected error: %v", err)
+	}
+	if s.DocPath != "CLAUDE.md" {
+		t.Errorf("DocPath = %q, want %q", s.DocPath, "CLAUDE.md")
+	}
+	want := fmt.Sprintf("%x", sha256.Sum256([]byte(fixtureAllSections)))
+	if s.Hash() != want {
+		t.Errorf("Hash() = %q, want %q (sha256 of fixture bytes)", s.Hash(), want)
+	}
+}
+
+func TestLoad_BothPresentIdenticalBytes_PrefersAGENTSMd(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "AGENTS.md"), []byte(fixtureAllSections), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "CLAUDE.md"), []byte(fixtureAllSections), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+	s, err := Load(tmp)
+	if err != nil {
+		t.Fatalf("Load: unexpected error: %v", err)
+	}
+	if s.DocPath != "AGENTS.md" {
+		t.Errorf("DocPath = %q, want %q (AGENTS.md wins ties)", s.DocPath, "AGENTS.md")
+	}
+}
+
+func TestLoad_BothPresentDifferentBytes_ReturnsTypedError(t *testing.T) {
+	tmp := t.TempDir()
+	// Mutate the CLAUDE.md copy so the two files differ. Any byte
+	// difference is enough to trip the guard.
+	claudeBytes := []byte(strings.Replace(fixtureAllSections, "A test wiki.", "A different wiki.", 1))
+	if err := os.WriteFile(filepath.Join(tmp, "AGENTS.md"), []byte(fixtureAllSections), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "CLAUDE.md"), claudeBytes, 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+	_, err := Load(tmp)
+	if err == nil {
+		t.Fatal("Load: expected error, got nil")
+	}
+	var ve ValidationError
+	if !errors.As(err, &ve) {
+		var me MultiError
+		if errors.As(err, &me) {
+			found := false
+			for _, e := range me.Errors {
+				if strings.Contains(e.Problem, "different contents") {
+					found = true
+					ve = e
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("MultiError did not contain 'different contents' error: %v", me)
+			}
+		} else {
+			t.Fatalf("error not ValidationError or MultiError: %T %v", err, err)
+		}
+	}
+	if ve.Section != "(load)" {
+		t.Errorf("Section = %q, want %q", ve.Section, "(load)")
+	}
+	msg := err.Error()
+	for _, want := range []string{"AGENTS.md", "CLAUDE.md", "different contents"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q missing substring %q", msg, want)
+		}
+	}
+}
+
 // ---------- Task 3: Render + Validate ----------
 
 func TestRender_InterpolatesKnownPlaceholders(t *testing.T) {

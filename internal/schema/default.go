@@ -1,8 +1,10 @@
 package schema
 
 import (
+	"bytes"
 	_ "embed"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -10,6 +12,14 @@ import (
 
 //go:embed default.md
 var DefaultDoc []byte
+
+// SchemaFilenames is the ordered list of filenames Load scans at the
+// wiki root. The first file present wins; AGENTS.md is canonical
+// (multi-vendor) and beats CLAUDE.md (Claude Code native) when both
+// exist with byte-identical content. Phase G's `init` and Phase E's
+// `schema show --doc` reuse this slice as the single source of truth
+// for the candidate list.
+var SchemaFilenames = []string{"AGENTS.md", "CLAUDE.md"}
 
 var (
 	bundledOnce sync.Once
@@ -41,23 +51,73 @@ func Bundled() Schema {
 	return bundled
 }
 
-// Load reads <wikiRoot>/AGENTS.md and parses it; falls back to Bundled()
-// when the file is absent. Validates structure on success;
-// ValidationError bubbles up so cmd/root.go's loadConfig can render
-// file:line on failure.
+// Load scans <wikiRoot> for the schema doc using SchemaFilenames in
+// order. The first file present is parsed and returned with DocPath
+// set to that filename. When both AGENTS.md and CLAUDE.md are present
+// with byte-identical content, AGENTS.md wins silently (the common
+// case is a symlink or copy). When both are present with different
+// content, Load refuses to guess and returns a typed ValidationError
+// naming both filenames so the user picks one before re-running.
+//
+// When no candidate file exists, Load falls back to Bundled() exactly
+// as v0.7 Phase A.1 did. Parse errors on the chosen file bubble up
+// unchanged so cmd/root.go's loadConfig can render file:line.
 func Load(wikiRoot string) (Schema, error) {
-	path := filepath.Join(wikiRoot, "AGENTS.md")
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
+	type found struct {
+		name string
+		data []byte
+	}
+	var hits []found
+	for _, name := range SchemaFilenames {
+		path := filepath.Join(wikiRoot, name)
+		data, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return Schema{}, err
+		}
+		hits = append(hits, found{name: name, data: data})
+	}
+
+	if len(hits) == 0 {
 		return Bundled(), nil
 	}
+
+	chosen := hits[0]
+	if len(hits) > 1 {
+		// Multiple schema-doc files present at the wiki root. If their
+		// contents are byte-identical, prefer the canonical filename
+		// (AGENTS.md, by virtue of SchemaFilenames ordering) silently.
+		// Otherwise refuse — surfacing a typed error is friendlier
+		// than silently picking one and confusing the user about
+		// which doc actually drove the next ingest.
+		allEqual := true
+		for i := 1; i < len(hits); i++ {
+			if !bytes.Equal(hits[0].data, hits[i].data) {
+				allEqual = false
+				break
+			}
+		}
+		if !allEqual {
+			names := make([]string, 0, len(hits))
+			for _, h := range hits {
+				names = append(names, h.name)
+			}
+			return Schema{}, ValidationError{
+				Section: "(load)",
+				Problem: fmt.Sprintf(
+					"found %s and %s with different contents at %s; remove one or make them identical (symlink one to the other) before continuing",
+					names[0], names[1], wikiRoot,
+				),
+			}
+		}
+	}
+
+	s, err := Parse(chosen.data)
 	if err != nil {
 		return Schema{}, err
 	}
-	s, err := Parse(data)
-	if err != nil {
-		return Schema{}, err
-	}
-	s.DocPath = "AGENTS.md"
+	s.DocPath = chosen.name
 	return s, nil
 }
