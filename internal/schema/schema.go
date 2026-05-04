@@ -1,0 +1,142 @@
+// Package schema implements the user-editable wiki schema doc — the
+// third Karpathy layer (after raw sources and the wiki itself). The
+// schema is a Markdown document the user reads and edits at AGENTS.md
+// in the wiki root; it controls what the LLM is *asked* and how the
+// page is *shaped*. It does NOT control what counts as valid evidence —
+// wiki.ValidateAndAttachEvidence is bundled and runs after every LLM
+// call regardless of what the schema-rendered prompt told the LLM.
+//
+// The trust property holds at the schema boundary: a malicious or
+// compromised schema can degrade page quality (more drops, fewer
+// pages land), but it cannot ground a false claim, because the
+// substring-match validator gates every page that reaches disk.
+package schema
+
+import (
+	"crypto/sha256"
+	"fmt"
+	"strings"
+)
+
+// SchemaFormatVersion is the schema doc format version this binary
+// understands. A doc declaring a higher version is rejected with a
+// "this binary supports version 1" error.
+const SchemaFormatVersion = 1
+
+// Schema is the parsed shape of an AGENTS.md schema doc. It carries
+// the prompts the LLM is asked, the ontology the page is shaped to,
+// and the optional glossary of domain terms. Hash() over the on-disk
+// raw bytes drives the db.schema_hash drift surface.
+type Schema struct {
+	Version   int
+	Generator string
+	Domain    string
+	Ontology  Ontology
+	Prompts   Prompts
+	Glossary  []GlossaryTerm
+
+	// raw is the on-disk bytes (or the embedded default for Bundled()).
+	// Hash() returns sha256(raw); a re-saved file with whitespace
+	// differences yields a new hash, matching user intuition (write =
+	// new hash = drift surface).
+	raw []byte
+
+	// DocPath is "AGENTS.md" when Load read the file, "" for Bundled().
+	// Surfaced in `schema show` and `mcp.get_schema`.
+	DocPath string
+}
+
+// Prompts carries the six load-bearing system prompts. Each is the
+// raw text from the corresponding H2 section, ready to be passed to
+// Render with per-call vars.
+type Prompts struct {
+	Ingest             string // {{domain}}, {{existing_titles}}, optional {{glossary}}
+	UpdateExisting     string // {{domain}}, {{existing_page_body}}, {{existing_evidence}}, optional {{glossary}}
+	Ask                string // {{domain}}, optional {{glossary}}
+	Contradiction      string // (no required placeholders)
+	PromoteRewrite     string // {{question}}, {{answer_body}}, {{evidence_quotes}}
+	LintContradictions string // (no required placeholders)
+}
+
+// Ontology is the shape of the page on disk. Field order matches the
+// canonical bundled order; rename is a name-string mapping over this
+// list (the canonical struct field carrying evidence is fixed).
+type Ontology struct {
+	Fields []OntologyField
+}
+
+// OntologyField is one row of the Page ontology bullet list. CanonicalName
+// maps positionally to the bundled canonical list; DeclaredName is what
+// the user wrote (equal to CanonicalName for an unrenamed schema).
+type OntologyField struct {
+	// CanonicalName is the bundled struct field name (e.g. "evidence",
+	// "title"). Maps via position to the bundled canonical list:
+	// [title, body, evidence, links, sources, tags, created,
+	//  updated_at, content_hash, source_ids]. The mapping is
+	// position-stable across renames.
+	CanonicalName string
+	// DeclaredName is what the user wrote (e.g. "citations" if they
+	// renamed `evidence`). Equal to CanonicalName for an unrenamed
+	// schema. Read on WritePage; consulted on ParsePage.
+	DeclaredName string
+	Type         string
+	Description  string
+}
+
+// GlossaryTerm is one row of the optional Glossary section. The
+// glossary is surfaced to prompts that opt into the optional
+// {{glossary}} placeholder.
+type GlossaryTerm struct {
+	Term       string
+	Definition string
+}
+
+// ValidationError is the structured failure shape returned by Parse
+// and Validate. Section names the H2 the problem lives under; Line
+// is 1-indexed into the raw doc (0 when not applicable); Problem is
+// a one-line human-readable summary.
+type ValidationError struct {
+	Section string
+	Line    int
+	Problem string
+}
+
+func (e ValidationError) Error() string {
+	if e.Line > 0 {
+		return fmt.Sprintf("schema validation: %s (line %d): %s", e.Section, e.Line, e.Problem)
+	}
+	if e.Section != "" {
+		return fmt.Sprintf("schema validation: %s: %s", e.Section, e.Problem)
+	}
+	return fmt.Sprintf("schema validation: %s", e.Problem)
+}
+
+// MultiError collects every ValidationError surfaced by Parse / Validate
+// so cmd/schema.go's `schema validate` can render every problem at once
+// rather than the user fixing one error, re-running, fixing the next.
+type MultiError struct {
+	Errors []ValidationError
+}
+
+func (m MultiError) Error() string {
+	var sb strings.Builder
+	for i, e := range m.Errors {
+		if i > 0 {
+			sb.WriteByte('\n')
+		}
+		sb.WriteString(e.Error())
+	}
+	return sb.String()
+}
+
+// Hash returns the sha256 of the on-disk doc bytes. Used by
+// db.schema_hash to gate the lint/status drift surface and by
+// `schema migrate` to skip already-migrated pages. Bundled() sets
+// raw = DefaultDoc, so Bundled().Hash() is a real hex hash too —
+// no sentinel, db.schema_hash treats bundled and edited uniformly.
+func (s Schema) Hash() string {
+	return fmt.Sprintf("%x", sha256.Sum256(s.raw))
+}
+
+// Raw returns the on-disk bytes; used by `schema show --doc`.
+func (s Schema) Raw() []byte { return s.raw }
