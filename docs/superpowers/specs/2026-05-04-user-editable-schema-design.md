@@ -616,10 +616,11 @@ OK
 
 ## Open questions
 
-Numbered for user feedback. First-cut answers are the spec's working defaults; the user confirms or overrides during plan-pass.
+Numbered for user feedback. First-cut answers are the spec's working defaults. **Resolved 2026-05-04:** all 15 questions resolved per the user's directive ("user-friendly, fast, Karpathy-aligned, no compromise on quality"). Q1 was overridden from the original first cut; Q2–Q15 hold as drafted.
 
 1. **Schema doc filename: `.llmwiki/schema.md` vs `AGENTS.md` at wiki root vs `CLAUDE.md`?**
-   *First cut: `.llmwiki/schema.md`.* Rationale: namespaced alongside `config.toml` (consistent with sub-project 5's `[providers.*]` block landing in `config.toml`); not tied to a specific agent vendor (CLAUDE / AGENTS feel branded); discoverable via `ls .llmwiki/`. Karpathy's gist uses `AGENTS.md` at the wiki root, which has its own appeal — a user opening the wiki dir sees the schema immediately. Counterargument that won: we are not Cursor / Claude / Codex / Gemini Code; the schema is a wiki concept, not an agent concept; namespacing under `.llmwiki/` keeps the wiki dir clean.
+   *Resolved: `AGENTS.md` at wiki root.* Karpathy's gist explicitly names AGENTS.md; it's discoverable on `ls` without a hidden-dir traversal; AGENTS.md is no longer single-vendor branded — Cursor, OpenAI Codex, Claude Code, and others all read it as a multi-vendor convention. The original first cut (`.llmwiki/schema.md`) optimized for namespacing alongside `config.toml`, but the user's directive prioritized Karpathy-alignment + user-friendliness. Rest of the spec uses `AGENTS.md` throughout; references to `.llmwiki/schema.md` should be read as `AGENTS.md` at wiki root.
+   *Original first cut: `.llmwiki/schema.md`.* Rationale: namespaced alongside `config.toml`; not tied to a specific agent vendor (CLAUDE / AGENTS felt branded at the time of drafting); discoverable via `ls .llmwiki/`.
 
 2. **Format: structured Markdown sections vs YAML frontmatter + Markdown body vs pure TOML?**
    *First cut: structured Markdown with H2 sections per concern (`## Page ontology`, `## Ingest prompt`, `## Update-existing prompt`, `## Ask prompt`, `## Contradiction prompt`, `## Glossary`).* Rationale: matches Karpathy's "AGENTS.md" framing, is human-readable, parseable by simple section split. Pure TOML loses prompt readability (multi-line strings get awkward). YAML frontmatter + Markdown body is a hybrid; we use it on a per-page basis already, but for a doc that is 90% prose, plain Markdown wins.
