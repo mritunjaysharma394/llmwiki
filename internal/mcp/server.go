@@ -34,7 +34,7 @@ type Deps struct {
 
 const (
 	serverName    = "llmwiki"
-	serverVersion = "0.5.0-rc.1" // bumped from 0.4.0 for sub-project 6a (promote_answer + return-shape extensions)
+	serverVersion = "0.6.0-rc.1" // bumped from "0.5.0-rc.1" for sub-project 6b (cross-page page-update pass)
 )
 
 // NewServer registers all seven tools — four read-only (list_pages, read_page,
@@ -146,6 +146,9 @@ func ingestTool() mcpgo.Tool {
 		mcpgo.WithBoolean("feed", mcpgo.Description("Force feed-parser dispatch (RSS / Atom / JSON Feed).")),
 		mcpgo.WithBoolean("sitemap", mcpgo.Description("Force sitemap dispatch.")),
 		mcpgo.WithNumber("max_pages", mcpgo.Description("Cap on feed entries / sitemap pages.")),
+		// Sub-project 6b (v0.6): cross-page page-update pass.
+		mcpgo.WithBoolean("update_existing",
+			mcpgo.Description("after writing new pages, propose updates to existing pages whose claims this source touches; off by default. Pages whose proposed body fails byte-exact substring-match validation against the union of (new + existing) source files stay at their previous version. Returns pages_updated and pages_update_failed counters in the response.")),
 	)
 }
 

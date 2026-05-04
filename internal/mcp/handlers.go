@@ -17,8 +17,19 @@ import (
 
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
+	"github.com/mritunjaysharma394/llmwiki/internal/llm"
 	"github.com/mritunjaysharma394/llmwiki/internal/wiki"
 )
+
+// ingestSourceFn is the package-level seam tests swap to inspect the
+// IngestOptions the MCP ingestHandler propagates and to inject a
+// synthetic IngestRunResult. Production callers use the real
+// wiki.IngestSource directly. Introduced in sub-project 6b Phase E so
+// the MCP-surface tests can drive update_existing wiring without
+// running the full ingest pipeline.
+var ingestSourceFn = func(ctx context.Context, cfg wiki.IngestSourceConfig, database *db.DB, client llm.Client, source string, opts wiki.IngestOptions) (wiki.IngestRunResult, error) {
+	return wiki.IngestSource(ctx, cfg, database, client, source, opts)
+}
 
 // errorResult builds a CallToolResult with IsError=true whose text content is
 // a JSON-encoded {code, message, ...extra} payload. MCP clients that surface
@@ -777,7 +788,7 @@ func writePageHandler(d Deps) mcpsrv.ToolHandlerFunc {
 // progress output doesn't pollute the JSON-RPC stdout channel; errors
 // surface in the structured response.
 //
-// Return JSON shape on success (sub-project 6a / v1.2.0):
+// Return JSON shape on success (sub-project 6b / v0.6.0-rc.1):
 //
 //	{
 //	  "source":                 string,
@@ -787,15 +798,22 @@ func writePageHandler(d Deps) mcpsrv.ToolHandlerFunc {
 //	  "skipped":                bool,
 //	  "retro_linked_pages":     int,    // sub-project 6a Phase D
 //	  "contradictions_flagged": int,    // sub-project 6a Phase E
+//	  "pages_updated":          int,    // sub-project 6b — count of
+//	                                    //   existing pages whose body
+//	                                    //   was rewritten and re-validated
+//	  "pages_update_failed":    int,    // sub-project 6b — count of
+//	                                    //   candidates whose proposed body
+//	                                    //   failed validation; those pages
+//	                                    //   stay at their previous version
 //	}
 //
-// retro_linked_pages counts existing pages whose body was rewritten to
-// include [[NewTitle]] for any of the new-this-batch titles (body-only,
-// idempotent; evidence rows untouched). contradictions_flagged counts
-// (newPage, existingPage) tuples where the contradiction-detection LLM
-// call returned a direct factual contradiction backed by validated
-// quotes on both sides; details append to <wikiDir>/contradictions.md.
-// Both counters are informational — they never block the ingest write.
+// pages_updated and pages_update_failed are non-zero only when the
+// caller passed update_existing: true (default false, Q11). The
+// trust property holds: every page with pages_updated++ has >=1
+// evidence quote that substring-matches some file in the union of
+// (this source + that page's prior sources); pages with
+// pages_update_failed++ are byte-identical on disk to their prior
+// version — we never silently downgrade.
 //
 // Structured errors: bad_request, ingest_failed.
 
@@ -809,6 +827,11 @@ func ingestHandler(d Deps) mcpsrv.ToolHandlerFunc {
 			Force:   req.GetBool("force", false),
 			Feed:    req.GetBool("feed", false),
 			Sitemap: req.GetBool("sitemap", false),
+			// Sub-project 6b: opt-in cross-page page-update pass over MCP.
+			UpdateExisting: req.GetBool("update_existing", false),
+			// The MCP boundary doesn't expose --debug-updates or the
+			// tunables; an MCP client that wants those should set them
+			// in [ingest] config.
 			// Logger left nil → io.Discard inside IngestSource.
 		}
 		if mp := req.GetInt("max_pages", 0); mp > 0 {
@@ -822,7 +845,7 @@ func ingestHandler(d Deps) mcpsrv.ToolHandlerFunc {
 			RawDir:           d.Cfg.RawDir,
 			RespectGitignore: true,
 		}
-		res, err := wiki.IngestSource(ctx, wcfg, d.DB, d.Client, source, opts)
+		res, err := ingestSourceFn(ctx, wcfg, d.DB, d.Client, source, opts)
 		if err != nil {
 			return errorResult("ingest_failed", err.Error(), nil), nil
 		}
@@ -834,6 +857,9 @@ func ingestHandler(d Deps) mcpsrv.ToolHandlerFunc {
 			"skipped":                res.Skipped,
 			"retro_linked_pages":     res.RetroLinkedPages,
 			"contradictions_flagged": res.ContradictionsFlagged,
+			// Sub-project 6b additions:
+			"pages_updated":       res.PagesUpdated,
+			"pages_update_failed": res.PagesUpdateFailed,
 		})
 	}
 }

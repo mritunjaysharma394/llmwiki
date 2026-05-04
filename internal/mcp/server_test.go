@@ -983,8 +983,8 @@ func TestPromoteAnswer_ToolRegistered(t *testing.T) {
 		sort.Strings(got)
 		t.Fatalf("promote_answer not registered; tools=%v", got)
 	}
-	if serverVersion != "0.5.0-rc.1" {
-		t.Errorf("serverVersion = %q, want %q", serverVersion, "0.5.0-rc.1")
+	if serverVersion != "0.6.0-rc.1" {
+		t.Errorf("serverVersion = %q, want %q", serverVersion, "0.6.0-rc.1")
 	}
 }
 
@@ -1107,6 +1107,223 @@ func TestPromoteAnswer_StaleEvidence(t *testing.T) {
 
 // TestPromoteAnswer_TitleCollision pre-seeds an existing page with the
 // target title; the handler should return a structured title_exists.
+// ----- Phase E (sub-project 6b) — mcp.ingest update_existing wiring -----
+
+// TestServerVersionIs060 pins the serverVersion constant to the v0.6
+// release line. Sub-project 6b bumps from "0.5.0-rc.1" to "0.6.0-rc.1";
+// this guard rail catches accidental rollback of the version string.
+func TestServerVersionIs060(t *testing.T) {
+	if serverVersion != "0.6.0-rc.1" {
+		t.Errorf("serverVersion = %q, want %q", serverVersion, "0.6.0-rc.1")
+	}
+}
+
+// TestIngest_AcceptsUpdateExistingArg drives mcp.ingest with
+// update_existing: true and asserts the flag propagates through the
+// ingestSourceFn seam into wiki.IngestOptions.
+func TestIngest_AcceptsUpdateExistingArg(t *testing.T) {
+	deps, cleanup := newTestDeps(t, &fakeIngestClient{})
+	defer cleanup()
+	if err := os.MkdirAll(deps.Cfg.WikiDir, 0755); err != nil {
+		t.Fatalf("mkdir wiki: %v", err)
+	}
+
+	tempDir := filepath.Dir(deps.Cfg.WikiDir)
+	srcPath := filepath.Join(tempDir, "ingest-src.md")
+	if err := os.WriteFile(srcPath, []byte("Goroutines are lightweight threads.\n"), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	prev := ingestSourceFn
+	defer func() { ingestSourceFn = prev }()
+	var captured wiki.IngestOptions
+	ingestSourceFn = func(ctx context.Context, cfg wiki.IngestSourceConfig, database *db.DB, client llm.Client, source string, opts wiki.IngestOptions) (wiki.IngestRunResult, error) {
+		captured = opts
+		return wiki.IngestRunResult{Source: source}, nil
+	}
+
+	srv := NewServer(deps)
+	c, done := connect(t, srv)
+	defer done()
+
+	res, text := callTool(t, c, "ingest", map[string]any{
+		"source":          srcPath,
+		"update_existing": true,
+	})
+	if res.IsError {
+		t.Fatalf("ingest returned error: %s", text)
+	}
+	if !captured.UpdateExisting {
+		t.Errorf("captured IngestOptions.UpdateExisting = false, want true")
+	}
+}
+
+// TestIngest_DefaultsUpdateExistingOff drives mcp.ingest without an
+// update_existing argument and asserts the flag defaults to false.
+func TestIngest_DefaultsUpdateExistingOff(t *testing.T) {
+	deps, cleanup := newTestDeps(t, &fakeIngestClient{})
+	defer cleanup()
+	if err := os.MkdirAll(deps.Cfg.WikiDir, 0755); err != nil {
+		t.Fatalf("mkdir wiki: %v", err)
+	}
+
+	tempDir := filepath.Dir(deps.Cfg.WikiDir)
+	srcPath := filepath.Join(tempDir, "ingest-src.md")
+	if err := os.WriteFile(srcPath, []byte("Goroutines are lightweight threads.\n"), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	prev := ingestSourceFn
+	defer func() { ingestSourceFn = prev }()
+	var captured wiki.IngestOptions
+	ingestSourceFn = func(ctx context.Context, cfg wiki.IngestSourceConfig, database *db.DB, client llm.Client, source string, opts wiki.IngestOptions) (wiki.IngestRunResult, error) {
+		captured = opts
+		return wiki.IngestRunResult{Source: source}, nil
+	}
+
+	srv := NewServer(deps)
+	c, done := connect(t, srv)
+	defer done()
+
+	res, text := callTool(t, c, "ingest", map[string]any{"source": srcPath})
+	if res.IsError {
+		t.Fatalf("ingest returned error: %s", text)
+	}
+	if captured.UpdateExisting {
+		t.Errorf("captured IngestOptions.UpdateExisting = true, want false (default)")
+	}
+}
+
+// TestIngest_ReturnShapeIncludesPagesUpdated drives mcp.ingest through
+// the ingestSourceFn seam with a synthetic IngestRunResult containing
+// PagesUpdated=2 and PagesUpdateFailed=1; the response payload must
+// surface both keys.
+func TestIngest_ReturnShapeIncludesPagesUpdated(t *testing.T) {
+	deps, cleanup := newTestDeps(t, &fakeIngestClient{})
+	defer cleanup()
+	if err := os.MkdirAll(deps.Cfg.WikiDir, 0755); err != nil {
+		t.Fatalf("mkdir wiki: %v", err)
+	}
+
+	tempDir := filepath.Dir(deps.Cfg.WikiDir)
+	srcPath := filepath.Join(tempDir, "ingest-src.md")
+	if err := os.WriteFile(srcPath, []byte("Goroutines are lightweight threads.\n"), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	prev := ingestSourceFn
+	defer func() { ingestSourceFn = prev }()
+	ingestSourceFn = func(ctx context.Context, cfg wiki.IngestSourceConfig, database *db.DB, client llm.Client, source string, opts wiki.IngestOptions) (wiki.IngestRunResult, error) {
+		return wiki.IngestRunResult{
+			Source:            source,
+			PagesUpdated:      2,
+			PagesUpdateFailed: 1,
+		}, nil
+	}
+
+	srv := NewServer(deps)
+	c, done := connect(t, srv)
+	defer done()
+
+	res, text := callTool(t, c, "ingest", map[string]any{
+		"source":          srcPath,
+		"update_existing": true,
+	})
+	if res.IsError {
+		t.Fatalf("ingest returned error: %s", text)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("unmarshal: %v\nraw=%s", err, text)
+	}
+	pu, ok := got["pages_updated"]
+	if !ok {
+		t.Fatalf("response missing pages_updated key (raw=%s)", text)
+	}
+	if puf, _ := pu.(float64); int(puf) != 2 {
+		t.Errorf("pages_updated = %v, want 2", got["pages_updated"])
+	}
+	puf, ok := got["pages_update_failed"]
+	if !ok {
+		t.Fatalf("response missing pages_update_failed key (raw=%s)", text)
+	}
+	if puff, _ := puf.(float64); int(puff) != 1 {
+		t.Errorf("pages_update_failed = %v, want 1", got["pages_update_failed"])
+	}
+}
+
+// TestIngest_ReturnShapePreservesV05Keys is a backwards-compat guard:
+// every v0.5 key (source, pages_written, evidence_quotes, dropped_pages,
+// skipped, retro_linked_pages, contradictions_flagged) must remain
+// present in the v0.6 response payload, alongside the new
+// pages_updated / pages_update_failed keys.
+func TestIngest_ReturnShapePreservesV05Keys(t *testing.T) {
+	deps, cleanup := newTestDeps(t, &fakeIngestClient{})
+	defer cleanup()
+	if err := os.MkdirAll(deps.Cfg.WikiDir, 0755); err != nil {
+		t.Fatalf("mkdir wiki: %v", err)
+	}
+
+	tempDir := filepath.Dir(deps.Cfg.WikiDir)
+	srcPath := filepath.Join(tempDir, "ingest-src.md")
+	if err := os.WriteFile(srcPath, []byte("Goroutines are lightweight threads.\n"), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	srv := NewServer(deps)
+	c, done := connect(t, srv)
+	defer done()
+
+	res, text := callTool(t, c, "ingest", map[string]any{"source": srcPath})
+	if res.IsError {
+		t.Fatalf("ingest returned error: %s", text)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("unmarshal: %v\nraw=%s", err, text)
+	}
+	for _, key := range []string{
+		"source", "pages_written", "evidence_quotes", "dropped_pages",
+		"skipped", "retro_linked_pages", "contradictions_flagged",
+		"pages_updated", "pages_update_failed",
+	} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("response missing %q key (raw=%s)", key, text)
+		}
+	}
+}
+
+// TestIngestTool_DescriptionMentionsUpdateExisting asserts the ingest
+// tool's input schema lists update_existing as a (boolean, optional)
+// argument with a description.
+func TestIngestTool_DescriptionMentionsUpdateExisting(t *testing.T) {
+	deps, cleanup := newTestDeps(t, nil)
+	defer cleanup()
+
+	srv := NewServer(deps)
+	tools := srv.ListTools()
+	st, ok := tools["ingest"]
+	if !ok {
+		t.Fatalf("ingest tool not registered")
+	}
+	props := st.Tool.InputSchema.Properties
+	prop, ok := props["update_existing"].(map[string]any)
+	if !ok {
+		t.Fatalf("update_existing property missing from ingest tool schema; properties=%v", props)
+	}
+	if t2, _ := prop["type"].(string); t2 != "boolean" {
+		t.Errorf("update_existing type = %v, want boolean", prop["type"])
+	}
+	if desc, _ := prop["description"].(string); desc == "" {
+		t.Errorf("update_existing description missing")
+	}
+	for _, r := range st.Tool.InputSchema.Required {
+		if r == "update_existing" {
+			t.Errorf("update_existing should not be required")
+		}
+	}
+}
+
 func TestPromoteAnswer_TitleCollision(t *testing.T) {
 	deps, cleanup := newTestDeps(t, nil)
 	defer cleanup()
