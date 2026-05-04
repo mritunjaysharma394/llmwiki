@@ -51,6 +51,16 @@ type IngestConfig struct {
 	FeedRequestsPerSecond float64 `toml:"feed_request_per_second"`
 	FeedMaxEntries        int     `toml:"feed_max_entries"`
 	SitemapMaxPages       int     `toml:"sitemap_max_pages"`
+
+	// Sub-project 6b — pillar 3 — cross-page page-update pass (v0.6).
+	// UpdateExisting is *bool to disambiguate "absent" (-> default
+	// false, Q11) from "explicitly false" — same shape RespectGitignore
+	// uses. Three tunables for per-source / global candidate caps and
+	// the quote floor (Q5, Q7). Default off everywhere; users opt in.
+	UpdateExisting                       *bool `toml:"update_existing"`
+	UpdateExistingMaxCandidatesPerSource int   `toml:"update_existing_max_candidates_per_source"`
+	UpdateExistingMaxCandidatesTotal     int   `toml:"update_existing_max_candidates_total"`
+	UpdateExistingQuoteFloor             int   `toml:"update_existing_quote_floor"`
 }
 
 // ProvidersConfig groups per-provider knobs that don't belong on the catch-all
@@ -101,6 +111,17 @@ func (c IngestConfig) RespectGitignoreOrDefault() bool {
 		return true
 	}
 	return *c.RespectGitignore
+}
+
+// UpdateExistingOrDefault returns the configured value, defaulting to false
+// when the config left it unset. Mirrors RespectGitignoreOrDefault but
+// flips the default polarity: the cross-page page-update pass is opt-in
+// (Q11), so an absent [ingest] update_existing key reads as off.
+func (c IngestConfig) UpdateExistingOrDefault() bool {
+	if c.UpdateExisting == nil {
+		return false
+	}
+	return *c.UpdateExisting
 }
 
 var (
@@ -296,6 +317,23 @@ func applyIngestDefaults(c *IngestConfig) {
 	}
 	if c.SitemapMaxPages == 0 {
 		c.SitemapMaxPages = 200
+	}
+	// Sub-project 6b — pillar 3 — cross-page page-update pass (v0.6).
+	// UpdateExisting defaults off (Q11). The three tunables — per-
+	// source and global candidate caps (Q5) and the quote floor (Q7) —
+	// pick up 20 / 50 / 2 when the config left them at zero.
+	if c.UpdateExisting == nil {
+		f := false
+		c.UpdateExisting = &f
+	}
+	if c.UpdateExistingMaxCandidatesPerSource == 0 {
+		c.UpdateExistingMaxCandidatesPerSource = 20
+	}
+	if c.UpdateExistingMaxCandidatesTotal == 0 {
+		c.UpdateExistingMaxCandidatesTotal = 50
+	}
+	if c.UpdateExistingQuoteFloor == 0 {
+		c.UpdateExistingQuoteFloor = 2
 	}
 }
 
