@@ -159,6 +159,18 @@ var rootCmd = &cobra.Command{
 				return fmt.Errorf("LLMWIKI_DIR=%q: %w", dir, err)
 			}
 		}
+		// `llmwiki schema show / validate / migrate` is the diagnostic
+		// surface for a broken AGENTS.md / CLAUDE.md. If we ran the
+		// strict loadConfig path here, a user with a malformed schema
+		// could not reach `schema validate` to find out *why* it was
+		// malformed. Take the soft path: load activeSchema via
+		// schema.Load (no Validate call), so the subcommand can render
+		// the structured error itself. We also skip database open and
+		// provider selection — `schema show` and `schema validate`
+		// don't need either.
+		if cmd.Parent() != nil && cmd.Parent().Name() == "schema" {
+			return loadSchemaSoft()
+		}
 		return loadConfig()
 	},
 }
@@ -175,6 +187,27 @@ func Execute() {
 		}
 		os.Exit(1)
 	}
+}
+
+// loadSchemaSoft populates activeSchema for the `schema` subcommands
+// without running Validate or opening the database. It exists so a user
+// with a malformed AGENTS.md / CLAUDE.md can still reach `llmwiki schema
+// validate` to diagnose the problem — the strict loadConfig path would
+// have bounced them out before the subcommand body ran. Parse errors
+// (which are the structural-level "this isn't a schema doc at all"
+// failures, not the Validate-level "missing required placeholder"
+// failures) DO bubble up here, since `schema validate` cannot run
+// against a Schema that didn't parse.
+func loadSchemaSoft() error {
+	sch, err := schema.Load(".")
+	if err != nil {
+		return cliutil.Wrap(
+			"loading schema doc (AGENTS.md or CLAUDE.md)",
+			err,
+			"the file is structurally malformed (frontmatter / section split). Fix the listed problem and re-run.")
+	}
+	activeSchema = sch
+	return nil
 }
 
 func loadConfig() error {
