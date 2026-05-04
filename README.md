@@ -37,21 +37,140 @@ llmwiki --version   # same output
 
 ## Quickstart
 
+The fastest path uses Google Gemini's free tier — no credit card, 1M-token
+context, generous daily quota. Grab a key at
+[aistudio.google.com/apikey](https://aistudio.google.com/apikey) and:
+
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+export GEMINI_API_KEY=...
 mkdir my-wiki && cd my-wiki
-llmwiki init
+llmwiki init                        # default provider is gemini
 llmwiki ingest https://github.com/golang/example
 llmwiki ask "what does the gotypes example do?"
 ```
 
-To use a local model instead of the Anthropic API (no key required):
+Run `llmwiki status` at any time to see what's been ingested.
+
+Already on Anthropic? Pass `--provider anthropic` (or drive llmwiki via your
+Claude subscription with no API spend at all — see the MCP section below):
 
 ```bash
-llmwiki init --provider ollama   # writes a config that points at Ollama
+export ANTHROPIC_API_KEY=sk-ant-...
+llmwiki init --provider anthropic
 ```
 
-Run `llmwiki status` to see the wiki state at any time.
+To run fully offline against a local model:
+
+```bash
+llmwiki init --provider ollama       # writes a config that points at Ollama
+```
+
+## Providers
+
+`llmwiki init --provider <name>` picks one of four backends. Pages from any
+provider go through the same evidence validator (see Trust model below) — a
+quote that doesn't byte-exact substring-match its named source file is
+dropped before disk.
+
+| Provider              | Cost                          | Setup                                                                                              | Notes                                                                                       |
+| --------------------- | ----------------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `gemini` *(default)*  | Free tier; 1M context         | `export GEMINI_API_KEY=...` (get one at https://aistudio.google.com/apikey, no card)               | Default model `gemini-2.0-flash`. Recommended onboarding path.                              |
+| `anthropic`           | Pay-per-token API, **or** free via MCP + Pro subscription | `export ANTHROPIC_API_KEY=sk-ant-...`, or skip the API entirely and use the MCP server below       | Default model `claude-haiku-4-5`. Highest quote-fidelity in our cassette tests.             |
+| `openai-compatible`   | Many free or near-free tiers  | Edit `[providers.openai_compat]` in `.llmwiki/config.toml` to point at your provider's `/v1` endpoint | Tested against Groq, OpenRouter, Together, Cerebras, Mistral La Plateforme. Free tiers may rate-limit and produce flakier structured output; the validator drops bad pages either way. |
+| `ollama`              | Free, fully offline           | `ollama pull llama3.2`, then `llmwiki init --provider ollama`                                      | Runs against `http://localhost:11434` by default. Source content never leaves your machine. |
+
+## Use your Claude subscription via MCP
+
+If you already pay for Claude Pro/Max, you can drive `llmwiki` from Claude
+Desktop or Claude Code with **zero API spend** — your subscription token
+budget is the only budget. `llmwiki mcp` runs as a Model Context Protocol
+stdio server exposing six tools to the client:
+
+- `list_pages` — list pages (optional title prefix and limit).
+- `read_page` — fetch one page's body, frontmatter, evidence, and links.
+- `lint` — staleness + contradiction report across the wiki.
+- `ask` — grounded Q&A with source quotes.
+- `write_page` — propose a new page; **rejected unless every evidence quote
+  is a byte-exact substring of the named, already-ingested source file**.
+- `ingest` — pull a new source into the wiki.
+
+### Claude Desktop
+
+Add this to `~/Library/Application Support/Claude/claude_desktop_config.json`
+(macOS) or the platform-equivalent path:
+
+```json
+{
+  "mcpServers": {
+    "llmwiki": {
+      "command": "llmwiki",
+      "args": ["mcp"],
+      "env": { "LLMWIKI_DIR": "/Users/me/my-wiki" }
+    }
+  }
+}
+```
+
+Restart Claude Desktop. The six tools appear in the tool picker.
+
+### Claude Code
+
+The fastest path is the `claude mcp add` CLI:
+
+```bash
+claude mcp add llmwiki -- llmwiki mcp
+# or, with an explicit working directory:
+claude mcp add llmwiki --env LLMWIKI_DIR=/Users/me/my-wiki -- llmwiki mcp
+```
+
+Or hand-edit `~/.config/claude-code/mcp_servers.json` with the same JSON
+shape as the Claude Desktop block above.
+
+### What `write_page` actually guarantees
+
+When Claude proposes a new page over MCP, the server runs the proposal
+through the same validation pipeline as `llmwiki ingest`:
+
+1. The named `source_file` must already be ingested into this wiki.
+2. Every quote in `evidence[]` must be a byte-exact substring of that
+   source file on disk.
+3. If either check fails, the tool returns a structured error with one of
+   `title_exists | evidence_required | source_not_ingested |
+   source_not_readable | evidence_invalid | write_failed | bad_request |
+   db_error` — the client re-renders the error so you see *why* the write
+   was rejected, instead of silently writing bad content.
+
+The MCP server logs to stderr; stdout is reserved for JSON-RPC, so it can
+be safely piped from any client.
+
+## Use Obsidian as the UI
+
+`.llmwiki/wiki/` is a plain folder of Markdown files with YAML frontmatter
+and `[[wikilinks]]` between pages — i.e. an Obsidian vault. Open the folder
+in Obsidian (no plugin required) and you get backlinks, the graph view,
+search, and Dataview queries for free.
+
+The vault layout:
+
+- `index.md` — auto-regenerated hub listing every page grouped by source.
+  **Don't hand-edit it**; the frontmatter says so. Re-run `llmwiki ingest`
+  or `llmwiki write_page` and the index regenerates.
+- `log.md` — append-only RFC3339 chronicle of ingest/ask/write events.
+- `<Page Title>.md` — one file per page, with `tags`, `sources`, `created`,
+  and `updated` keys spelled the way Dataview expects.
+
+For example, this Dataview query lists every page Dataview can see, with
+its sources and last-update time:
+
+````markdown
+```dataview
+table sources, updated FROM "" WHERE contains(tags, "llmwiki")
+```
+````
+
+Cross-page references in page bodies are written as `[[Page Title]]`;
+Obsidian's link autocomplete, backlinks panel, and graph view all pick them
+up without configuration.
 
 ## Ingestion sources
 
@@ -159,11 +278,28 @@ mis-attributed across files in the same source. See
 [`docs/superpowers/specs/2026-05-03-trust-the-output-design.md`](docs/superpowers/specs/2026-05-03-trust-the-output-design.md)
 for the full design.
 
+The same validator runs on every code path that writes a page — `ingest`,
+`write_page` over MCP, every provider. That gives a single trust property
+across the matrix:
+
+> A wiki ingested with Gemini Flash, OpenRouter free-tier models, or Ollama
+> may contain fewer pages than the same source ingested with Haiku, but
+> every page that lands in the wiki passes the same evidence check.
+> Switching to a cheaper model produces a sparser wiki, never a more wrong
+> one.
+
 ## Privacy
 
 - **Anthropic provider**: source content is sent to the Anthropic API at
   ingest and at ask time.
+- **Gemini provider**: source content is sent to the Google Gemini API.
+- **OpenAI-compatible provider**: source content is sent to whichever
+  endpoint you configured (`base_url` in `[providers.openai_compat]`).
 - **Ollama provider**: everything stays on your machine.
+- **MCP server**: when driven by Claude Desktop / Claude Code, your
+  Anthropic Pro/Max subscription handles the model calls — `llmwiki mcp`
+  itself does not call any LLM API. Source content reaches whichever model
+  the client is configured to use.
 - **`.llmwiki/`** holds the wiki, the SQLite database, the saved answer
   archive, and `config.toml`. It's local and `.gitignore`d by convention.
 - No telemetry, ever.
@@ -175,11 +311,19 @@ Pre-existing configs missing newer keys silently inherit defaults.
 
 ### `[llm]`
 
-| Key          | Default                  | Description                                       |
-| ------------ | ------------------------ | ------------------------------------------------- |
-| `provider`   | `"anthropic"`            | LLM provider: `"anthropic"` or `"ollama"`         |
-| `model`      | `"claude-haiku-4-5"`     | Model identifier passed to the provider           |
-| `ollama_url` | `"http://localhost:11434"` | Base URL of the Ollama server                   |
+| Key          | Default                    | Description                                                                       |
+| ------------ | -------------------------- | --------------------------------------------------------------------------------- |
+| `provider`   | `"gemini"`                 | LLM provider: `"gemini"`, `"anthropic"`, `"openai-compatible"`, or `"ollama"`     |
+| `model`      | provider-dependent         | Model identifier passed to the provider (defaults: `gemini-2.0-flash`, `claude-haiku-4-5`, provider-config `default_model`, `llama3.2`) |
+| `ollama_url` | `"http://localhost:11434"` | Base URL of the Ollama server                                                     |
+
+### `[providers.openai_compat]`
+
+| Key             | Default                  | Description                                                            |
+| --------------- | ------------------------ | ---------------------------------------------------------------------- |
+| `base_url`      | `""`                     | OpenAI-compatible endpoint (e.g. `https://openrouter.ai/api/v1`)       |
+| `api_key_env`   | `"OPENAI_COMPAT_API_KEY"` | Name of the environment variable holding the API key                   |
+| `default_model` | `""`                     | Model passed to `/chat/completions` (override per-call with `--model`) |
 
 ### `[wiki]`
 
@@ -213,11 +357,14 @@ Pre-existing configs missing newer keys silently inherit defaults.
 
 ### Environment variables
 
-| Variable             | Description                                                                       |
-| -------------------- | --------------------------------------------------------------------------------- |
-| `ANTHROPIC_API_KEY`  | Required when `provider = "anthropic"`. Get one at https://console.anthropic.com/settings/keys |
-| `LLMWIKI_CASSETTE`   | When set, the LLM client replays from `internal/llm/testdata/cassettes/<name>__*.json` instead of calling the live API. Used by `make smoke`. |
-| `NO_COLOR`           | Disable ANSI colors in CLI output                                                 |
+| Variable                | Description                                                                       |
+| ----------------------- | --------------------------------------------------------------------------------- |
+| `GEMINI_API_KEY`        | Required when `provider = "gemini"`. Free at https://aistudio.google.com/apikey   |
+| `ANTHROPIC_API_KEY`     | Required when `provider = "anthropic"`. https://console.anthropic.com/settings/keys |
+| `OPENAI_COMPAT_API_KEY` | Default env var name for `provider = "openai-compatible"`. Override via `[providers.openai_compat].api_key_env`. |
+| `LLMWIKI_DIR`           | Override the wiki directory `llmwiki mcp` operates against (defaults to `$PWD`).  |
+| `LLMWIKI_CASSETTE`      | When set, the LLM client replays from `internal/llm/testdata/cassettes/<name>__*.json` instead of calling the live API. Used by `make smoke`. |
+| `NO_COLOR`              | Disable ANSI colors in CLI output                                                 |
 
 ## Architecture
 
@@ -243,6 +390,8 @@ ingest <source>->|  walk /  |------->|  chunk  |------->|   LLM    |
                                                                           ^
                                                                           |
                               ask <q>  ----> retrieve ----> LLM ---- + render
+
+                              MCP client ----> llmwiki mcp ----> same validate path
 ```
 
 Design specs and plans live under
@@ -264,8 +413,8 @@ LLMWIKI_RECORD=1 ANTHROPIC_API_KEY=sk-ant-... go test ./... -run TestName -v
 ```
 
 The nightly `cassette-refresh` workflow under `.github/workflows/` re-records
-everything against `secrets.ANTHROPIC_API_KEY` and opens a PR if the cassettes
-drifted.
+everything against `secrets.ANTHROPIC_API_KEY` / `secrets.GEMINI_API_KEY` /
+`secrets.OPENROUTER_API_KEY` and opens a PR if the cassettes drifted.
 
 `make smoke` runs the README quickstart end-to-end against a tiny synthetic
 source, using a recorded cassette so it works without an API key. Note: the
@@ -282,6 +431,7 @@ Apache-2.0. See [`LICENSE`](LICENSE) and [`CHANGELOG.md`](CHANGELOG.md).
 Inspired by Andrej Karpathy's note on building a personal wiki with an LLM.
 Thanks to the authors of the dependencies that make this possible —
 [`charmbracelet/glamour`](https://github.com/charmbracelet/glamour),
+[`mark3labs/mcp-go`](https://github.com/mark3labs/mcp-go),
 [`mmcdole/gofeed`](https://github.com/mmcdole/gofeed),
 [`go-shiori/go-readability`](https://github.com/go-shiori/go-readability),
 [`JohannesKaufmann/html-to-markdown`](https://github.com/JohannesKaufmann/html-to-markdown),
