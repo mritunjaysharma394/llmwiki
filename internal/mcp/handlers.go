@@ -8,12 +8,15 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	mcpsrv "github.com/mark3labs/mcp-go/server"
 
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
+	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
 	"github.com/mritunjaysharma394/llmwiki/internal/wiki"
 )
 
@@ -399,19 +402,403 @@ func askHandler(d Deps) mcpsrv.ToolHandlerFunc {
 	}
 }
 
-// ----- write_page (stub, replaced in Phase G2) ---------------------------
+// ----- write_page ---------------------------------------------------------
+//
+// write_page is the load-bearing MCP tool. Every page-write driven over
+// MCP funnels through this handler, which in turn funnels through
+// wiki.ValidateAndAttachEvidence — the same trust-property validator
+// cmd/ingest uses. Quotes that don't byte-exactly substring-match the
+// named source_file are rejected with a structured error and never
+// reach disk or DB. Title collisions, missing evidence, and ingest-not-
+// done sources all return their own structured-error codes so the
+// agent can react programmatically.
+//
+// log.md only records validated, written pages. Failed write_page
+// calls go to stderr (and the structured error payload returned to the
+// client) — never to log.md. Spec §risks calls this out as the
+// denial-of-evidence vector mitigation.
 
 func writePageHandler(d Deps) mcpsrv.ToolHandlerFunc {
 	return func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-		return mcpgo.NewToolResultError("write_page not yet implemented in this phase (Phase G2)"), nil
+		title, err := req.RequireString("title")
+		if err != nil {
+			return errorResult("bad_request", err.Error(), nil), nil
+		}
+		body, err := req.RequireString("body")
+		if err != nil {
+			return errorResult("bad_request", err.Error(), nil), nil
+		}
+
+		args := req.GetArguments()
+
+		// 1. Title collision: refuse early so we never silently overwrite an
+		//    existing page. The agent must call read_page + supersede via
+		//    links if it wants to replace prior content (resolves spec open
+		//    question 3).
+		if existing, err := d.DB.GetPage(title); err != nil {
+			return errorResult("db_error", "checking existing page: "+err.Error(), nil), nil
+		} else if existing != nil {
+			return errorResult("title_exists",
+				fmt.Sprintf("a page titled %q already exists", title),
+				map[string]any{"existing_path": existing.Path}), nil
+		}
+
+		// 2. Parse evidence. Schema requires at least one entry; we still
+		//    re-check defensively in case a client bypasses the schema or
+		//    the schema isn't enforced server-side.
+		evRaw, _ := args["evidence"].([]any)
+		if len(evRaw) == 0 {
+			return errorResult("evidence_required",
+				"write_page requires at least one evidence quote", nil), nil
+		}
+
+		type evidenceInput struct {
+			Quote      string
+			SourceFile string
+		}
+		var inputs []evidenceInput
+		for _, it := range evRaw {
+			m, ok := it.(map[string]any)
+			if !ok {
+				continue
+			}
+			q, _ := m["quote"].(string)
+			sf, _ := m["source_file"].(string)
+			inputs = append(inputs, evidenceInput{Quote: q, SourceFile: sf})
+		}
+		if len(inputs) == 0 {
+			return errorResult("evidence_required",
+				"write_page requires at least one well-formed evidence entry (each with quote + source_file)", nil), nil
+		}
+
+		// 3. Resolve every named source_file against the DB. Build a
+		//    synthetic []ingest.SourceFile from the resolved rows so
+		//    ValidateAndAttachEvidence sees the same shape it sees during
+		//    ingest. Sources can live under cfg.RawDir/<sourceURI>/<rel>
+		//    or be re-readable from the original URI; v1.1 reads the
+		//    canonical content from db (we don't currently snapshot
+		//    source_file content into the DB, so we rely on the URI being
+		//    a path that's still readable from disk).
+		sources, err := d.DB.GetAllSources()
+		if err != nil {
+			return errorResult("db_error", "loading sources: "+err.Error(), nil), nil
+		}
+		// Build a path → (source URI, source_file row) lookup from
+		// every ingested source_file, indexed by RelativePath.
+		type sfRef struct {
+			sourceURI string
+			file      db.SourceFile
+		}
+		byPath := map[string]sfRef{}
+		for _, s := range sources {
+			files, err := d.DB.GetSourceFiles(s.ID)
+			if err != nil {
+				continue
+			}
+			for _, f := range files {
+				if _, taken := byPath[f.RelativePath]; taken {
+					continue
+				}
+				byPath[f.RelativePath] = sfRef{sourceURI: s.URI, file: f}
+			}
+		}
+
+		// Resolve named source_files and build the ingest.SourceFile[]
+		// the validator wants. Read content fresh from disk under the
+		// source URI; if the source URI isn't a local path we currently
+		// cannot reconstruct content, so the agent must re-ingest first
+		// (this matches the spec's "MCP needs an already-ingested
+		// source" assumption).
+		fileSet := map[string]ingest.SourceFile{}
+		for _, in := range inputs {
+			ref, ok := byPath[in.SourceFile]
+			if !ok {
+				return errorResult("source_not_ingested",
+					fmt.Sprintf("source_file %q has no source_files row; run llmwiki ingest first", in.SourceFile),
+					map[string]any{"source_file": in.SourceFile}), nil
+			}
+			if _, dup := fileSet[in.SourceFile]; dup {
+				continue
+			}
+			content, err := readSourceFileContent(ref.sourceURI, ref.file.RelativePath)
+			if err != nil {
+				return errorResult("source_not_readable",
+					fmt.Sprintf("cannot read source_file %q from source %q: %v", in.SourceFile, ref.sourceURI, err),
+					map[string]any{"source_file": in.SourceFile, "source_uri": ref.sourceURI}), nil
+			}
+			fileSet[in.SourceFile] = ingest.NewSourceFile(in.SourceFile, content)
+		}
+		ingestFiles := make([]ingest.SourceFile, 0, len(fileSet))
+		for _, f := range fileSet {
+			ingestFiles = append(ingestFiles, f)
+		}
+
+		// 4. Run the validator. Build a synthetic Page with the agent-
+		//    supplied evidence; ValidateAndAttachEvidence drops anything
+		//    that fails the byte-exact substring match and returns the
+		//    surviving quotes plus computed line ranges.
+		linkInputs, _ := args["links"].([]any)
+		var linkObjs []wiki.Link
+		for _, l := range linkInputs {
+			lm, ok := l.(map[string]any)
+			if !ok {
+				continue
+			}
+			to, _ := lm["to"].(string)
+			typ, _ := lm["type"].(string)
+			if to == "" {
+				continue
+			}
+			linkObjs = append(linkObjs, wiki.Link{To: to, Type: typ})
+		}
+
+		candidate := wiki.Page{
+			Title: title,
+			Body:  body,
+			Links: linkObjs,
+		}
+		for _, in := range inputs {
+			candidate.Evidence = append(candidate.Evidence, wiki.Evidence{
+				Quote:          in.Quote,
+				SourceFilePath: in.SourceFile,
+			})
+		}
+
+		validated, _ := wiki.ValidateAndAttachEvidence([]wiki.Page{candidate}, ingestFiles)
+		if len(validated) == 0 {
+			// Reconstruct the dropped report: every input quote that didn't
+			// byte-match its named source_file. We compute this directly
+			// from the inputs (the validator already logged warnings to
+			// stderr) so the structured error payload tells the agent
+			// which quotes failed and why.
+			dropped := make([]map[string]any, 0, len(inputs))
+			for _, in := range inputs {
+				f, ok := fileSet[in.SourceFile]
+				switch {
+				case !ok:
+					dropped = append(dropped, map[string]any{
+						"quote":       in.Quote,
+						"source_file": in.SourceFile,
+						"reason":      "source_file not in resolved set",
+					})
+				case !strings.Contains(f.Content, in.Quote):
+					dropped = append(dropped, map[string]any{
+						"quote":       in.Quote,
+						"source_file": in.SourceFile,
+						"reason":      "quote not a byte-exact substring of the named source_file",
+					})
+				}
+			}
+			return errorResult("evidence_invalid",
+				"every evidence quote failed validation; nothing was written",
+				map[string]any{
+					"dropped": dropped,
+					"hint":    "quotes must be byte-exact substrings of an already-ingested source_file's content",
+				}), nil
+		}
+		page := validated[0]
+
+		// 5. Stamp tags / sources / created and run the wikilink rewrite.
+		//    SourceIDs is the union of every source backing the surviving
+		//    evidence — for write_page that's typically one entry per
+		//    distinct source URI, deduped via the sfRef lookup above.
+		srcIDSet := map[int64]struct{}{}
+		var srcIDs []int64
+		for _, e := range page.Evidence {
+			ref, ok := byPath[e.SourceFilePath]
+			if !ok {
+				continue
+			}
+			if _, dup := srcIDSet[ref.file.SourceID]; dup {
+				continue
+			}
+			srcIDSet[ref.file.SourceID] = struct{}{}
+			srcIDs = append(srcIDs, ref.file.SourceID)
+		}
+		now := time.Now().UTC()
+		page.SourceIDs = srcIDs
+		page.UpdatedAt = now
+		if page.Created.IsZero() {
+			page.Created = now
+		}
+		page.ContentHash = wiki.HashContent(page.Body)
+		page.Tags = []string{"llmwiki", "mcp.write_page"}
+		// Sources: distinct source_file paths from the surviving evidence.
+		seen := map[string]struct{}{}
+		var sourcesList []string
+		for _, e := range page.Evidence {
+			if e.SourceFilePath == "" {
+				continue
+			}
+			if _, dup := seen[e.SourceFilePath]; dup {
+				continue
+			}
+			seen[e.SourceFilePath] = struct{}{}
+			sourcesList = append(sourcesList, e.SourceFilePath)
+		}
+		page.Sources = sourcesList
+
+		// Wikilink rewrite: union of existing wiki titles + this new page's
+		// title. Matches what cmd/ingest does for ingested pages.
+		titles, err := d.DB.AllPageTitles()
+		if err != nil {
+			return errorResult("db_error", "loading page titles: "+err.Error(), nil), nil
+		}
+		titles = append(titles, page.Title)
+		page.Body = wiki.RewriteBareReferencesAsWikilinks(page.Body, titles)
+
+		// 6. Disk + DB writes. Errors here surface as code: "write_failed"
+		//    so the agent can distinguish trust-validator rejection from
+		//    operational issues (full disk, db locked, etc).
+		if err := os.MkdirAll(d.Cfg.WikiDir, 0755); err != nil {
+			return errorResult("write_failed", "mkdir wiki dir: "+err.Error(), nil), nil
+		}
+		path := wiki.PagePath(d.Cfg.WikiDir, page.Title)
+		if err := wiki.WritePage(page, d.Cfg.WikiDir); err != nil {
+			return errorResult("write_failed", "writing page: "+err.Error(), nil), nil
+		}
+		rec := db.PageRecord{
+			Title:       page.Title,
+			Path:        path,
+			Body:        page.Body,
+			ContentHash: page.ContentHash,
+			SourceIDs:   page.SourceIDs,
+		}
+		if err := d.DB.UpsertPage(rec); err != nil {
+			return errorResult("write_failed", "db upsert: "+err.Error(), nil), nil
+		}
+		stored, err := d.DB.GetPage(page.Title)
+		if err != nil || stored == nil {
+			return errorResult("write_failed", "re-fetching written page", nil), nil
+		}
+
+		// Map evidence rows back to source_file IDs / source IDs so
+		// InsertEvidence FKs resolve. Group by source so InsertEvidence
+		// (which takes one sourceID per call) is invoked once per
+		// distinct source.
+		evBySource := map[int64][]db.Evidence{}
+		for _, e := range page.Evidence {
+			ref, ok := byPath[e.SourceFilePath]
+			if !ok {
+				continue
+			}
+			sfid := ref.file.ID
+			evBySource[ref.file.SourceID] = append(evBySource[ref.file.SourceID], db.Evidence{
+				Quote:        e.Quote,
+				LineStart:    e.LineStart,
+				LineEnd:      e.LineEnd,
+				SourceFileID: &sfid,
+			})
+		}
+		evidenceCount := 0
+		for sid, items := range evBySource {
+			if err := d.DB.InsertEvidence(stored.ID, sid, items); err != nil {
+				return errorResult("write_failed", "insert evidence: "+err.Error(), nil), nil
+			}
+			evidenceCount += len(items)
+		}
+
+		// Links table.
+		if len(page.Links) > 0 {
+			var links []db.Link
+			for _, l := range page.Links {
+				links = append(links, db.Link{FromPage: page.Title, ToPage: l.To, LinkType: l.Type})
+			}
+			_ = d.DB.UpsertLinks(page.Title, links)
+		}
+
+		// 7. Side files: regenerate index, append log. Best-effort —
+		//    failures go to stderr and don't undo the disk write.
+		allPageRecs, err := d.DB.AllPages()
+		if err == nil {
+			allSources, _ := d.DB.GetAllSources()
+			if rerr := wiki.RegenerateIndex(d.Cfg.WikiDir, allPageRecs, allSources, time.Now().UTC()); rerr != nil {
+				fmt.Fprintf(os.Stderr, "  WARN regenerating index.md after mcp.write_page: %v\n", rerr)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "  WARN reading pages for index after mcp.write_page: %v\n", err)
+		}
+		_ = wiki.AppendLog(d.Cfg.WikiDir, wiki.LogEntry{
+			At:      time.Now().UTC(),
+			Kind:    "mcp.write_page",
+			Payload: fmt.Sprintf("%s → %d evidence quotes", page.Title, evidenceCount),
+		})
+
+		return jsonResult(map[string]any{
+			"title":           page.Title,
+			"path":            path,
+			"evidence_quotes": evidenceCount,
+			"sources":         sourcesList,
+		})
 	}
 }
 
-// ----- ingest (stub, replaced in Phase G2) -------------------------------
+// readSourceFileContent reads the bytes of source_file <relPath> living
+// under <sourceURI>. For local paths it reads sourceURI as a file (when
+// relPath == basename of sourceURI) or sourceURI/relPath (when sourceURI
+// is a directory). HTTP/HTTPS URIs return an error — v1.1's MCP
+// write_page assumes the source still resolves to local content; the
+// agent should re-ingest the URL first if the original bytes aren't
+// retained on disk.
+func readSourceFileContent(sourceURI, relPath string) ([]byte, error) {
+	// If sourceURI itself is a file and relPath ends up matching it,
+	// just read sourceURI directly.
+	if data, err := os.ReadFile(sourceURI); err == nil {
+		return data, nil
+	}
+	candidate := filepath.Join(sourceURI, relPath)
+	if data, err := os.ReadFile(candidate); err == nil {
+		return data, nil
+	}
+	if strings.HasPrefix(sourceURI, "http://") || strings.HasPrefix(sourceURI, "https://") {
+		return nil, fmt.Errorf("HTTP source — re-ingest before write_page")
+	}
+	return nil, fmt.Errorf("not found at %q or %q", sourceURI, filepath.Join(sourceURI, relPath))
+}
+
+// ----- ingest -------------------------------------------------------------
+//
+// ingestHandler delegates to wiki.IngestSource — the same callable
+// cmd/ingest's runIngest wraps. internal/mcp deliberately does not
+// import cmd/, so the runner's lifted-out form (Task 11 step 3) is
+// what makes this handler implementable. Logger is io.Discard so
+// progress output doesn't pollute the JSON-RPC stdout channel; errors
+// surface in the structured response.
 
 func ingestHandler(d Deps) mcpsrv.ToolHandlerFunc {
 	return func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-		return mcpgo.NewToolResultError("ingest not yet implemented in this phase (Phase G2)"), nil
+		source, err := req.RequireString("source")
+		if err != nil {
+			return errorResult("bad_request", err.Error(), nil), nil
+		}
+		opts := wiki.IngestOptions{
+			Force:   req.GetBool("force", false),
+			Feed:    req.GetBool("feed", false),
+			Sitemap: req.GetBool("sitemap", false),
+			// Logger left nil → io.Discard inside IngestSource.
+		}
+		if mp := req.GetInt("max_pages", 0); mp > 0 {
+			opts.MaxPages = mp
+		}
+		// MCP's slim cfg only carries WikiDir/RawDir/DBPath; fall back
+		// to the runner's package defaults for everything else. The CLI
+		// keeps its richer Config by going through cmd's runIngest.
+		wcfg := wiki.IngestSourceConfig{
+			WikiDir:          d.Cfg.WikiDir,
+			RawDir:           d.Cfg.RawDir,
+			RespectGitignore: true,
+		}
+		res, err := wiki.IngestSource(ctx, wcfg, d.DB, d.Client, source, opts)
+		if err != nil {
+			return errorResult("ingest_failed", err.Error(), nil), nil
+		}
+		return jsonResult(map[string]any{
+			"source":          res.Source,
+			"pages_written":   res.PagesWritten,
+			"evidence_quotes": res.EvidenceQuotes,
+			"dropped_pages":   res.DroppedPages,
+			"skipped":         res.Skipped,
+		})
 	}
 }
 

@@ -88,19 +88,61 @@ func askTool() mcpgo.Tool {
 	)
 }
 
+// writePageTool's schema mirrors what the LLM ingest pipeline accepts:
+// every page MUST include at least one evidence quote, each evidence
+// entry names the source_file the quote was copied from, and quotes
+// that don't byte-exactly substring-match the named source_file get
+// rejected by ValidateAndAttachEvidence. mcp-go v0.50.0's WithArray +
+// Items takes a JSON-Schema-shaped map[string]any for nested objects;
+// we match the same shape used by the v3 write_pages tool schema in
+// internal/wiki/ops.go.
 func writePageTool() mcpgo.Tool {
 	return mcpgo.NewTool(
 		"write_page",
-		mcpgo.WithDescription("Create or update a wiki page (Phase G2)."),
-		mcpgo.WithString("title", mcpgo.Required()),
-		mcpgo.WithString("body", mcpgo.Required()),
+		mcpgo.WithDescription(
+			"Create a new wiki page. Every evidence quote MUST be a verbatim substring "+
+				"of the named source_file's content; the same validator that gates 'llmwiki "+
+				"ingest' rejects unverified quotes here. Title collisions return code: "+
+				"\"title_exists\"; pre-ingest your sources first if a quote's source_file "+
+				"isn't yet known to the DB."),
+		mcpgo.WithString("title", mcpgo.Description("New page title (must not collide with an existing page)."), mcpgo.Required()),
+		mcpgo.WithString("body", mcpgo.Description("Markdown body of the page."), mcpgo.Required()),
+		mcpgo.WithArray("evidence",
+			mcpgo.Description("At least one quote required. Each quote must byte-exactly substring-match the named source_file's content."),
+			mcpgo.Required(),
+			mcpgo.Items(map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"quote":       map[string]any{"type": "string", "description": "Verbatim substring of the named source_file's content."},
+					"source_file": map[string]any{"type": "string", "description": "Path of an already-ingested source_file (relative_path)."},
+				},
+				"required": []string{"quote", "source_file"},
+			})),
+		mcpgo.WithArray("links",
+			mcpgo.Description("Optional outbound links to other pages."),
+			mcpgo.Items(map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"to":   map[string]any{"type": "string"},
+					"type": map[string]any{"type": "string", "enum": []string{"supports", "contradicts", "supersedes", "related"}},
+				},
+				"required": []string{"to", "type"},
+			})),
 	)
 }
 
+// ingestTool exposes the ingest pipeline to MCP clients. The handler
+// drives wiki.IngestSource, the same callable cmd/ingest's runIngest
+// wraps. force re-ingests despite an unchanged whole-source hash; feed
+// / sitemap force-dispatch the relevant fetcher.
 func ingestTool() mcpgo.Tool {
 	return mcpgo.NewTool(
 		"ingest",
-		mcpgo.WithDescription("Ingest a source URI into the wiki (Phase G2)."),
-		mcpgo.WithString("source", mcpgo.Required()),
+		mcpgo.WithDescription("Ingest a source (file path, URL, or GitHub repo) into the wiki. Returns pages_written, evidence_quotes, dropped_pages."),
+		mcpgo.WithString("source", mcpgo.Description("Source URI: a local path, http(s):// URL, or github.com URL."), mcpgo.Required()),
+		mcpgo.WithBoolean("force", mcpgo.Description("Re-ingest even if the source's content hash is unchanged.")),
+		mcpgo.WithBoolean("feed", mcpgo.Description("Force feed-parser dispatch (RSS / Atom / JSON Feed).")),
+		mcpgo.WithBoolean("sitemap", mcpgo.Description("Force sitemap dispatch.")),
+		mcpgo.WithNumber("max_pages", mcpgo.Description("Cap on feed entries / sitemap pages.")),
 	)
 }

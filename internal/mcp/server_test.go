@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -376,4 +377,391 @@ func equalSlices(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// ----- write_page / ingest tests (Phase G2) ---------------------------------
+
+// seedIngestedSource writes <content> to a temp file under deps.Cfg.WikiDir's
+// parent and inserts the matching sources / source_files rows so the
+// write_page handler can resolve the source_file path. Returns the
+// absolute on-disk path the test should pass as `source_file`.
+func seedIngestedSource(t *testing.T, deps Deps, content string) string {
+	t.Helper()
+	// Use a sibling tempdir to deps.Cfg.WikiDir so paths are predictable.
+	dir := filepath.Dir(deps.Cfg.WikiDir)
+	srcPath := filepath.Join(dir, "seed-source.md")
+	if err := os.WriteFile(srcPath, []byte(content), 0644); err != nil {
+		t.Fatalf("write seed source: %v", err)
+	}
+	srcID, err := deps.DB.UpsertSource(srcPath, "h-seed")
+	if err != nil {
+		t.Fatalf("UpsertSource: %v", err)
+	}
+	if _, err := deps.DB.UpsertSourceFile(db.SourceFile{
+		SourceID:     srcID,
+		RelativePath: srcPath,
+		ContentHash:  "h-seed",
+		ByteSize:     int64(len(content)),
+		LineCount:    1,
+	}); err != nil {
+		t.Fatalf("UpsertSourceFile: %v", err)
+	}
+	return srcPath
+}
+
+func TestWritePage_ValidEvidenceWritesPage(t *testing.T) {
+	deps, cleanup := newTestDeps(t, nil)
+	defer cleanup()
+	if err := os.MkdirAll(deps.Cfg.WikiDir, 0755); err != nil {
+		t.Fatalf("mkdir wiki: %v", err)
+	}
+
+	content := "the quick brown fox jumps over the lazy dog\n"
+	srcPath := seedIngestedSource(t, deps, content)
+
+	srv := NewServer(deps)
+	c, done := connect(t, srv)
+	defer done()
+
+	res, text := callTool(t, c, "write_page", map[string]any{
+		"title": "Foo",
+		"body":  "Foo is a study of foxes.",
+		"evidence": []any{
+			map[string]any{"quote": "quick brown fox", "source_file": srcPath},
+		},
+	})
+	if res.IsError {
+		t.Fatalf("expected success; got IsError=true, raw=%s", text)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, text)
+	}
+	if got["title"] != "Foo" {
+		t.Errorf("title = %v, want Foo", got["title"])
+	}
+
+	// Disk: page file exists.
+	pagePath := filepath.Join(deps.Cfg.WikiDir, "Foo.md")
+	if _, err := os.Stat(pagePath); err != nil {
+		t.Errorf("page not on disk at %s: %v", pagePath, err)
+	}
+	// DB: page row exists.
+	page, err := deps.DB.GetPage("Foo")
+	if err != nil || page == nil {
+		t.Fatalf("page row missing: err=%v page=%v", err, page)
+	}
+	// Evidence linked.
+	ev, err := deps.DB.GetEvidenceForPage(page.ID)
+	if err != nil {
+		t.Fatalf("GetEvidenceForPage: %v", err)
+	}
+	if len(ev) != 1 || ev[0].Quote != "quick brown fox" {
+		t.Errorf("evidence rows = %v, want one quote 'quick brown fox'", ev)
+	}
+	// index.md regenerated.
+	if _, err := os.Stat(filepath.Join(deps.Cfg.WikiDir, "index.md")); err != nil {
+		t.Errorf("index.md not regenerated: %v", err)
+	}
+	// log.md got an mcp.write_page entry.
+	logBody, err := os.ReadFile(filepath.Join(deps.Cfg.WikiDir, "log.md"))
+	if err != nil {
+		t.Fatalf("read log.md: %v", err)
+	}
+	if !strings.Contains(string(logBody), "mcp.write_page") {
+		t.Errorf("log.md missing mcp.write_page line: %s", logBody)
+	}
+}
+
+func TestWritePage_InvalidEvidenceReturnsStructuredError(t *testing.T) {
+	deps, cleanup := newTestDeps(t, nil)
+	defer cleanup()
+	if err := os.MkdirAll(deps.Cfg.WikiDir, 0755); err != nil {
+		t.Fatalf("mkdir wiki: %v", err)
+	}
+
+	content := "the quick brown fox jumps over the lazy dog\n"
+	srcPath := seedIngestedSource(t, deps, content)
+
+	srv := NewServer(deps)
+	c, done := connect(t, srv)
+	defer done()
+
+	res, text := callTool(t, c, "write_page", map[string]any{
+		"title": "Bad",
+		"body":  "Body that quotes something not in source.",
+		"evidence": []any{
+			map[string]any{"quote": "this is not in the source", "source_file": srcPath},
+		},
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError=true, raw=%s", text)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("error payload not JSON: %v\nraw: %s", err, text)
+	}
+	if got["code"] != "evidence_invalid" {
+		t.Errorf("code = %v, want evidence_invalid", got["code"])
+	}
+	if _, ok := got["dropped"]; !ok {
+		t.Errorf("missing dropped field; raw=%s", text)
+	}
+	if _, ok := got["hint"]; !ok {
+		t.Errorf("missing hint field; raw=%s", text)
+	}
+	dropped, _ := got["dropped"].([]any)
+	if len(dropped) != 1 {
+		t.Errorf("dropped len = %d, want 1", len(dropped))
+	} else {
+		dm, _ := dropped[0].(map[string]any)
+		if dm["quote"] != "this is not in the source" {
+			t.Errorf("dropped[0].quote = %v", dm["quote"])
+		}
+		if dm["reason"] == "" {
+			t.Errorf("dropped[0].reason missing")
+		}
+	}
+
+	// No disk write.
+	if _, err := os.Stat(filepath.Join(deps.Cfg.WikiDir, "Bad.md")); err == nil {
+		t.Error("page Bad.md should NOT exist after evidence_invalid")
+	}
+	// No DB row.
+	if p, _ := deps.DB.GetPage("Bad"); p != nil {
+		t.Error("DB row for Bad should NOT exist")
+	}
+	// No log.md line for Bad — log.md may not exist at all, or may
+	// exist from an unrelated run, but it must not contain a
+	// mcp.write_page entry referencing this title.
+	if data, err := os.ReadFile(filepath.Join(deps.Cfg.WikiDir, "log.md")); err == nil {
+		if strings.Contains(string(data), "Bad") {
+			t.Errorf("log.md should not record failed write_page; got: %s", data)
+		}
+	}
+}
+
+func TestWritePage_TitleCollisionReturnsStructuredError(t *testing.T) {
+	deps, cleanup := newTestDeps(t, nil)
+	defer cleanup()
+	if err := os.MkdirAll(deps.Cfg.WikiDir, 0755); err != nil {
+		t.Fatalf("mkdir wiki: %v", err)
+	}
+
+	content := "alpha beta gamma delta\n"
+	srcPath := seedIngestedSource(t, deps, content)
+
+	srv := NewServer(deps)
+	c, done := connect(t, srv)
+	defer done()
+
+	// First call: should succeed.
+	res, text := callTool(t, c, "write_page", map[string]any{
+		"title": "Greek",
+		"body":  "Greek letters body.",
+		"evidence": []any{
+			map[string]any{"quote": "alpha beta", "source_file": srcPath},
+		},
+	})
+	if res.IsError {
+		t.Fatalf("first call should succeed; got error: %s", text)
+	}
+
+	// Second call same title: title_exists.
+	res, text = callTool(t, c, "write_page", map[string]any{
+		"title": "Greek",
+		"body":  "Different body but same title.",
+		"evidence": []any{
+			map[string]any{"quote": "gamma delta", "source_file": srcPath},
+		},
+	})
+	if !res.IsError {
+		t.Fatalf("expected title_exists error, raw=%s", text)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("unmarshal error: %v\nraw=%s", err, text)
+	}
+	if got["code"] != "title_exists" {
+		t.Errorf("code = %v, want title_exists", got["code"])
+	}
+	if got["existing_path"] == nil || got["existing_path"] == "" {
+		t.Errorf("existing_path missing or empty")
+	}
+}
+
+func TestWritePage_RequiresAtLeastOneEvidenceEntry(t *testing.T) {
+	deps, cleanup := newTestDeps(t, nil)
+	defer cleanup()
+	if err := os.MkdirAll(deps.Cfg.WikiDir, 0755); err != nil {
+		t.Fatalf("mkdir wiki: %v", err)
+	}
+
+	srv := NewServer(deps)
+	c, done := connect(t, srv)
+	defer done()
+
+	res, text := callTool(t, c, "write_page", map[string]any{
+		"title":    "Empty",
+		"body":     "Body.",
+		"evidence": []any{},
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError=true; raw=%s", text)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("error payload not JSON: %v\nraw=%s", err, text)
+	}
+	if got["code"] != "evidence_required" {
+		t.Errorf("code = %v, want evidence_required", got["code"])
+	}
+}
+
+func TestWritePage_SourceMustBeIngested(t *testing.T) {
+	deps, cleanup := newTestDeps(t, nil)
+	defer cleanup()
+	if err := os.MkdirAll(deps.Cfg.WikiDir, 0755); err != nil {
+		t.Fatalf("mkdir wiki: %v", err)
+	}
+
+	srv := NewServer(deps)
+	c, done := connect(t, srv)
+	defer done()
+
+	res, text := callTool(t, c, "write_page", map[string]any{
+		"title": "Floating",
+		"body":  "Body referencing an unknown source.",
+		"evidence": []any{
+			map[string]any{"quote": "anything", "source_file": "/no/such/path/never-ingested.md"},
+		},
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError=true; raw=%s", text)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("error payload not JSON: %v\nraw=%s", err, text)
+	}
+	if got["code"] != "source_not_ingested" {
+		t.Errorf("code = %v, want source_not_ingested", got["code"])
+	}
+	if got["source_file"] != "/no/such/path/never-ingested.md" {
+		t.Errorf("source_file = %v", got["source_file"])
+	}
+}
+
+// fakeIngestClient returns a canned CompleteStructured response shaped like
+// the write_pages tool result so wiki.IngestSourceFilesToPages produces a
+// validated page without any real LLM call.
+type fakeIngestClient struct {
+	fakeClient
+}
+
+func (f *fakeIngestClient) CompleteStructured(ctx context.Context, system, user string, ts llm.ToolSchema) (map[string]any, error) {
+	// Pull the source file path out of the user prompt's "=== <path> ===" header
+	// so the validator's source_file attribution matches. Best-effort: the
+	// full prompt has a `=== <path> ===` line right before the body.
+	path := "source"
+	for _, line := range strings.Split(user, "\n") {
+		if strings.HasPrefix(line, "=== ") && strings.HasSuffix(line, " ===") {
+			path = strings.TrimSuffix(strings.TrimPrefix(line, "=== "), " ===")
+			break
+		}
+	}
+	return map[string]any{
+		"pages": []any{
+			map[string]any{
+				"title": "FakePage",
+				"body":  "Body about goroutines.",
+				"evidence": []any{
+					map[string]any{"quote": "Goroutines are lightweight", "source_file": path},
+				},
+			},
+		},
+	}, nil
+}
+
+func TestIngest_DelegatesToRunIngest(t *testing.T) {
+	deps, cleanup := newTestDeps(t, &fakeIngestClient{})
+	defer cleanup()
+	if err := os.MkdirAll(deps.Cfg.WikiDir, 0755); err != nil {
+		t.Fatalf("mkdir wiki: %v", err)
+	}
+
+	tempDir := filepath.Dir(deps.Cfg.WikiDir)
+	srcPath := filepath.Join(tempDir, "ingest-src.md")
+	if err := os.WriteFile(srcPath, []byte("Goroutines are lightweight threads.\n"), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	srv := NewServer(deps)
+	c, done := connect(t, srv)
+	defer done()
+
+	res, text := callTool(t, c, "ingest", map[string]any{"source": srcPath})
+	if res.IsError {
+		t.Fatalf("ingest returned error: %s", text)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("unmarshal: %v\nraw=%s", err, text)
+	}
+	for _, key := range []string{"pages_written", "evidence_quotes", "dropped_pages"} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("response missing %q (raw=%s)", key, text)
+		}
+	}
+	pw, _ := got["pages_written"].(float64)
+	if pw <= 0 {
+		t.Errorf("pages_written = %v, want > 0", got["pages_written"])
+	}
+
+	// Pages reach disk.
+	page, err := deps.DB.GetPage("FakePage")
+	if err != nil || page == nil {
+		t.Fatalf("FakePage missing from DB: err=%v page=%v", err, page)
+	}
+	if _, err := os.Stat(filepath.Join(deps.Cfg.WikiDir, "FakePage.md")); err != nil {
+		t.Errorf("FakePage.md not on disk: %v", err)
+	}
+}
+
+func TestIngest_ForceFlag(t *testing.T) {
+	deps, cleanup := newTestDeps(t, &fakeIngestClient{})
+	defer cleanup()
+	if err := os.MkdirAll(deps.Cfg.WikiDir, 0755); err != nil {
+		t.Fatalf("mkdir wiki: %v", err)
+	}
+
+	tempDir := filepath.Dir(deps.Cfg.WikiDir)
+	srcPath := filepath.Join(tempDir, "ingest-src.md")
+	if err := os.WriteFile(srcPath, []byte("Goroutines are lightweight threads.\n"), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	srv := NewServer(deps)
+	c, done := connect(t, srv)
+	defer done()
+
+	// First ingest.
+	if _, text := callTool(t, c, "ingest", map[string]any{"source": srcPath}); text == "" {
+		t.Fatal("first ingest produced empty result")
+	}
+
+	// Second ingest without force: should be skipped (unchanged hash).
+	_, text2 := callTool(t, c, "ingest", map[string]any{"source": srcPath})
+	var got2 map[string]any
+	_ = json.Unmarshal([]byte(text2), &got2)
+	if got2["skipped"] != true {
+		t.Errorf("expected skipped=true on second call without force; got %v (raw=%s)", got2["skipped"], text2)
+	}
+
+	// Third ingest with force: should NOT be skipped.
+	_, text3 := callTool(t, c, "ingest", map[string]any{"source": srcPath, "force": true})
+	var got3 map[string]any
+	_ = json.Unmarshal([]byte(text3), &got3)
+	if got3["skipped"] == true {
+		t.Errorf("force=true should re-ingest; got skipped=true (raw=%s)", text3)
+	}
 }
