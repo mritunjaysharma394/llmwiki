@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -542,6 +543,123 @@ func jsonEscape(s string) string {
 	s = strings.ReplaceAll(s, `%`, `\%`)
 	s = strings.ReplaceAll(s, `_`, `\_`)
 	return s
+}
+
+// PageUpdateLogEntry mirrors one row of page_update_log. Outcome must
+// be one of: "updated", "body_only", "failed", "skipped". SourceID == 0
+// writes NULL (the page-update pass may run with no associated source
+// row, e.g. when the new pages were ingested before this update pass
+// fired in a different invocation). NewContentHash == "" writes NULL
+// (failed outcomes have no new hash).
+type PageUpdateLogEntry struct {
+	PageID           int64
+	SourceID         int64
+	PriorContentHash string
+	NewContentHash   string
+	Outcome          string
+	Reason           string
+	EvidenceAdded    int
+	EvidenceRemoved  int
+	CreatedAt        time.Time // populated on read; ignored on write
+}
+
+var ErrInvalidOutcome = errors.New("invalid outcome")
+
+var validOutcomes = map[string]bool{
+	"updated": true, "body_only": true, "failed": true, "skipped": true,
+}
+
+// DeleteEvidenceForPage removes every evidence row associated with the
+// given page. The AFTER DELETE trigger on evidence handles the FTS
+// mirror cleanup. Used by the cross-page page-update pass to swap an
+// updated page's evidence atomically (delete-old + insert-new).
+func (d *DB) DeleteEvidenceForPage(pageID int64) error {
+	_, err := d.sql.Exec(`DELETE FROM evidence WHERE page_id = ?`, pageID)
+	return err
+}
+
+// InsertPageUpdateLog appends one audit-trail row. Called from
+// wiki.UpdateExistingPagesFromSource on every outcome (updated /
+// body_only / failed / skipped) so a user can sqlite3-grep the log to
+// understand why a particular page did or did not change.
+func (d *DB) InsertPageUpdateLog(e PageUpdateLogEntry) error {
+	if !validOutcomes[e.Outcome] {
+		return fmt.Errorf("%w: %q (valid: updated, body_only, failed, skipped)",
+			ErrInvalidOutcome, e.Outcome)
+	}
+	var sourceID any
+	if e.SourceID != 0 {
+		sourceID = e.SourceID
+	}
+	var newHash any
+	if e.NewContentHash != "" {
+		newHash = e.NewContentHash
+	}
+	var reason any
+	if e.Reason != "" {
+		reason = e.Reason
+	}
+	_, err := d.sql.Exec(`
+		INSERT INTO page_update_log
+			(page_id, source_id, prior_content_hash, new_content_hash,
+			 outcome, reason, evidence_added, evidence_removed)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.PageID, sourceID, e.PriorContentHash, newHash,
+		e.Outcome, reason, e.EvidenceAdded, e.EvidenceRemoved)
+	return err
+}
+
+// GetPageUpdateLog returns the most recent `limit` log entries for the
+// given page, newest first. Used by --debug-updates and (potentially)
+// future lint integrations.
+func (d *DB) GetPageUpdateLog(pageID int64, limit int) ([]PageUpdateLogEntry, error) {
+	rows, err := d.sql.Query(`
+		SELECT id, page_id, COALESCE(source_id, 0), prior_content_hash,
+		       COALESCE(new_content_hash, ''), outcome, COALESCE(reason, ''),
+		       COALESCE(evidence_added, 0), COALESCE(evidence_removed, 0),
+		       created_at
+		FROM page_update_log
+		WHERE page_id = ?
+		ORDER BY created_at DESC, id DESC
+		LIMIT ?`, pageID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PageUpdateLogEntry
+	for rows.Next() {
+		var e PageUpdateLogEntry
+		var id int64
+		if err := rows.Scan(&id, &e.PageID, &e.SourceID, &e.PriorContentHash,
+			&e.NewContentHash, &e.Outcome, &e.Reason,
+			&e.EvidenceAdded, &e.EvidenceRemoved, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// CountPageUpdateLogByOutcome returns a map of outcome → count over
+// the entire page_update_log table. Used by cmd/status to surface
+// pages_updated_total and pages_update_failed_total counters.
+// Pure read; never modifies the table.
+func (d *DB) CountPageUpdateLogByOutcome() (map[string]int, error) {
+	rows, err := d.sql.Query(`SELECT outcome, COUNT(*) FROM page_update_log GROUP BY outcome`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var oc string
+		var n int
+		if err := rows.Scan(&oc, &n); err != nil {
+			return nil, err
+		}
+		out[oc] = n
+	}
+	return out, rows.Err()
 }
 
 func (d *DB) GetAllSources() ([]Source, error) {
