@@ -1,7 +1,11 @@
 package schema
 
 import (
+	"crypto/sha256"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -299,5 +303,93 @@ func TestParse_DuplicateSection_Errors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "duplicate section") {
 		t.Errorf("error = %v, want substring 'duplicate section'", err)
+	}
+}
+
+// ---------- Task 2: Bundled() + Load() ----------
+
+func TestBundled_Parses_NoError(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Bundled() panicked: %v", r)
+		}
+	}()
+	s := Bundled()
+	if s.Version != 1 {
+		t.Errorf("Bundled().Version = %d, want 1", s.Version)
+	}
+	if s.Domain == "" {
+		t.Error("Bundled().Domain empty")
+	}
+	if len(s.Ontology.Fields) == 0 {
+		t.Error("Bundled().Ontology.Fields empty")
+	}
+}
+
+func TestBundled_HashIsRealHex(t *testing.T) {
+	s := Bundled()
+	h := s.Hash()
+	want := fmt.Sprintf("%x", sha256.Sum256(DefaultDoc))
+	if h != want {
+		t.Errorf("Bundled().Hash() = %q, want %q", h, want)
+	}
+	if h == "bundled" {
+		t.Error("Bundled().Hash() must be a real sha256 hex, not the legacy 'bundled' sentinel")
+	}
+	if len(h) != 64 {
+		t.Errorf("Bundled().Hash() = %q (len %d), want 64-hex", h, len(h))
+	}
+}
+
+func TestBundled_AllRequiredPromptsNonEmpty(t *testing.T) {
+	s := Bundled()
+	cases := []struct {
+		name string
+		got  string
+	}{
+		{"Ingest", s.Prompts.Ingest},
+		{"UpdateExisting", s.Prompts.UpdateExisting},
+		{"Ask", s.Prompts.Ask},
+		{"Contradiction", s.Prompts.Contradiction},
+		{"PromoteRewrite", s.Prompts.PromoteRewrite},
+		{"LintContradictions", s.Prompts.LintContradictions},
+	}
+	for _, c := range cases {
+		if strings.TrimSpace(c.got) == "" {
+			t.Errorf("Bundled().Prompts.%s empty", c.name)
+		}
+	}
+}
+
+func TestLoad_FallsBackToBundledWhenAGENTSMdAbsent(t *testing.T) {
+	tmp := t.TempDir()
+	s, err := Load(tmp)
+	if err != nil {
+		t.Fatalf("Load: unexpected error: %v", err)
+	}
+	if s.DocPath != "" {
+		t.Errorf("DocPath = %q, want empty (fell back to Bundled)", s.DocPath)
+	}
+	if s.Hash() != Bundled().Hash() {
+		t.Errorf("Load(empty dir).Hash() = %q, want bundled hash %q", s.Hash(), Bundled().Hash())
+	}
+}
+
+func TestLoad_ParsesAGENTSMdWhenPresent(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "AGENTS.md")
+	if err := os.WriteFile(path, []byte(fixtureAllSections), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	s, err := Load(tmp)
+	if err != nil {
+		t.Fatalf("Load: unexpected error: %v", err)
+	}
+	if s.DocPath != "AGENTS.md" {
+		t.Errorf("DocPath = %q, want %q", s.DocPath, "AGENTS.md")
+	}
+	want := fmt.Sprintf("%x", sha256.Sum256([]byte(fixtureAllSections)))
+	if s.Hash() != want {
+		t.Errorf("Hash() = %q, want %q (sha256 of fixture bytes)", s.Hash(), want)
 	}
 }
