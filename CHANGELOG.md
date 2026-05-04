@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-05-04
+
+### Added
+- `llmwiki promote <answer-file-or-slug>` — new command that lifts a
+  saved answer (`.llmwiki/answers/<ts>-<slug>.md`) into a permanent
+  wiki page. Defensive re-validation runs every evidence quote
+  through the same byte-exact substring-match validator that gates
+  `ingest` and `mcp.write_page` — answers whose source files have
+  changed since the ask are rejected with `evidence_invalid`. Flags:
+  `--title`, `--rewrite` (default off), `--no-save`.
+- `mcp.promote_answer` MCP tool — same defensive validation over MCP.
+  Inputs: `answer_path` (required), `title`, `rewrite`, `no_save`.
+  Returns `{title, path, evidence_quotes, rewrite_applied,
+  retro_linked_pages: []string}`. Seventh MCP tool.
+- Retro-linker — every new page (from `ingest`, `promote`, or
+  `mcp.write_page`) automatically gets `[[Title]]` backlinks added
+  to existing pages whose bodies mention it in bare prose. Body-only,
+  idempotent, evidence rows untouched, no LLM call. Surfaces in the
+  `ingest` summary line as "Retro-linked N existing page(s)".
+- Contradiction-on-ingest — when a new page's claim conflicts with
+  an existing page's claim, the conflict prints inline ("!! N
+  contradiction(s) flagged") and appends to
+  `<wikiDir>/contradictions.md` in an Obsidian-friendly append-only
+  format. Uses whatever provider you configured at `init` (Gemini
+  Flash users pay nothing; Anthropic users pay typical Haiku rates
+  per ingest). Failures are non-fatal — the new pages still land.
+- `mcp.ingest` return shape extended: adds `retro_linked_pages: int`
+  and `contradictions_flagged: int`. `mcp.write_page` gains
+  `retro_linked_pages: int`.
+
+### Changed
+- `internal/mcp` `serverVersion` bumped to `1.2.0`.
+
+### Notes
+- **No schema migration.** `PRAGMA user_version` stays at 3.
+- The existing `lint` command's whole-wiki contradiction batcher is
+  unchanged. Live contradiction-on-ingest is a sibling, not a
+  replacement.
+- v1.3 (sub-project 6b) will add the cross-page page-update pass
+  under a default-off `--update-existing` flag, plus further
+  `mcp.ingest` return-shape extensions (`pages_updated`,
+  `pages_update_failed`). Out of scope for v1.2.
+
 ## [1.1.0] — 2026-05-04
 
 ### Added
@@ -107,7 +150,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   database.
 - Cassette-based LLM client for record/replay testing.
 
-[Unreleased]: https://github.com/mritunjaysharma394/llmwiki/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/mritunjaysharma394/llmwiki/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v1.2.0
 [1.1.0]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v1.1.0
 [1.0.0-rc.1]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v1.0.0-rc.1
 [0.2.0]: https://github.com/mritunjaysharma394/llmwiki/releases/tag/v0.2.0

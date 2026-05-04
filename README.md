@@ -84,7 +84,7 @@ dropped before disk.
 If you already pay for Claude Pro/Max, you can drive `llmwiki` from Claude
 Desktop or Claude Code with **zero API spend** — your subscription token
 budget is the only budget. `llmwiki mcp` runs as a Model Context Protocol
-stdio server exposing six tools to the client:
+stdio server exposing seven tools to the client:
 
 - `list_pages` — list pages (optional title prefix and limit).
 - `read_page` — fetch one page's body, frontmatter, evidence, and links.
@@ -93,6 +93,8 @@ stdio server exposing six tools to the client:
 - `write_page` — propose a new page; **rejected unless every evidence quote
   is a byte-exact substring of the named, already-ingested source file**.
 - `ingest` — pull a new source into the wiki.
+- `promote_answer` — lifts a saved answer into a real page with the same
+  trust validation as `write_page`. See "Living Wiki" below.
 
 ### Claude Desktop
 
@@ -287,6 +289,100 @@ across the matrix:
 > every page that lands in the wiki passes the same evidence check.
 > Switching to a cheaper model produces a sparser wiki, never a more wrong
 > one.
+
+v1.2's three new behaviours (promote, retro-link, contradictions) all
+preserve the validator: every page reaching disk has at least one evidence
+quote that substring-matches its source — `promote` defensively re-validates
+because source files may have changed since the ask.
+
+## Living Wiki
+
+Three additive behaviours layered on v1.1 that keep the wiki current as you
+use it. None of them weaken the trust property; all of them are cheap.
+
+### Promote a saved answer into a permanent page
+
+Every `llmwiki ask` archives its transcript under `.llmwiki/answers/`. When
+an answer is good enough to keep, lift it into a real wiki page:
+
+```bash
+llmwiki ask "how does the validator work?"
+ls .llmwiki/answers/
+# 2026-05-04-150208-how-does-validator-work.md
+
+llmwiki promote .llmwiki/answers/2026-05-04-150208-how-does-validator-work.md \
+                --title "Validator Internals"
+# Loaded answer: how does validator work
+# Re-validating 4 evidence quote(s)...
+#   ✓ all 4 quotes still substring-match their source files
+#   ✓ wrote page "Validator Internals" (4 evidence, 1 source)
+#   ✓ retro-linked 2 existing page(s) to [[Validator Internals]]
+# saved: .llmwiki/wiki/Validator Internals.md
+```
+
+`promote` defensively re-runs every quote in the answer through the same
+substring-match validator that gates `ingest` and `mcp.write_page`. If a
+source file changed since the ask, the promote is rejected with
+`evidence_invalid` — never silently writing stale content. Flags:
+`--title` (otherwise derived from the answer's question), `--rewrite`
+(off by default; opt-in for an LLM rewrite into wiki-style prose),
+`--no-save` (skip the `log.md` entry, debug only). Same shape over MCP via
+the new `promote_answer` tool.
+
+### Contradictions surface inline at ingest
+
+When a new page's claim conflicts with an existing page's claim, the
+conflict prints inline and appends to `<wikiDir>/contradictions.md`:
+
+```bash
+llmwiki ingest https://example.com/blog/2026-go-channels-rewrite.html
+# Ingested 2 page(s) from https://example.com/blog/2026-go-channels-rewrite.html
+#   ✓ Channel Internals (3 evidence, files: blog.html)
+#   ✓ Goroutine Scheduling Changes (4 evidence, files: blog.html)
+#
+# !! 1 contradiction(s) flagged against the new pages:
+#    - new page "Channel Internals" claims:
+#        > "channel sends are now never lock-free"
+#      conflicts with existing page [[Go Concurrency]]:
+#        > "channel sends on uncontended channels remain lock-free"
+#      both quotes are validated against their own sources; resolve manually.
+#      logged to: .llmwiki/contradictions.md
+```
+
+`contradictions.md` is plain Markdown, append-only, Obsidian-readable.
+Detection uses your configured provider — Gemini Flash users pay nothing,
+Anthropic users pay typical Haiku rates per ingest (~$0.05–0.15 depending
+on the wiki's size). For the heaviest ingests we recommend Gemini Flash.
+Failures of the contradiction call never fail the ingest — the new pages
+still land.
+
+### Retro-linker keeps the graph current
+
+Every new page (from `ingest`, `promote`, or `mcp.write_page`) automatically
+gets `[[Title]]` backlinks added to existing pages whose bodies mention it
+in bare prose:
+
+```bash
+llmwiki ingest ./internal/sync/mutex.go
+# Ingested 1 page(s) from ./internal/sync/mutex.go
+#   ✓ Mutex Implementation (5 evidence, files: internal/sync/mutex.go)
+# Retro-linked 4 existing page(s) that now reference [[Mutex Implementation]]:
+#   - Goroutine Scheduling
+#   - Channel Internals
+#   - Trust Property Validator
+#   - Database Layer
+```
+
+Body-only, idempotent, no LLM call. Evidence rows are untouched. Open
+`.llmwiki/wiki/` in Obsidian and the graph view lights up the new
+connections immediately.
+
+### Coming in v1.3
+
+Sub-project 6b adds a cross-page page-update pass under a default-off
+`--update-existing` flag — when a new source updates earlier pages, those
+pages get their bodies refined under the same validator. Out of scope for
+v1.2.
 
 ## Privacy
 
