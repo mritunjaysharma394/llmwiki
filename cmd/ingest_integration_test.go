@@ -590,3 +590,215 @@ func TestContradictionFlaggedOnIngest(t *testing.T) {
 		t.Errorf("inline log missing flagged-count line:\n%s", logBuf.String())
 	}
 }
+
+// TestUpdateExistingHappyPath drives sub-project 6b's pillar 3
+// --update-existing flag end-to-end against a recorded Gemini Flash
+// cassette. Pre-seeds five existing pages with valid evidence (each
+// from its own small synthetic source), ingests a sixth source whose
+// content overlaps three of those pages, and asserts:
+//
+//   - IngestRunResult.PagesUpdated == 3, PagesUpdateFailed == 0;
+//   - UpdatedTitles names exactly the three overlapping pages;
+//   - page_update_log has 3 outcome='updated' rows for the right pages
+//     and 0 outcome='failed' rows for them;
+//   - the trust property: every quote in each updated page substring-
+//     matches some file in the union of (sixth-source files + the
+//     page's prior source files). The validator is the gatekeeper.
+//
+// Recording target is Gemini Flash (cassette refresh stays free per
+// spec risk #2). The cassette captures: 3 ingest LLM calls (one per
+// pre-seed source), 1 ingest call for the sixth source's new pages,
+// and 3 cross-page update LLM calls (one per FTS-shortlisted candidate).
+//
+// The cassette JSON is NOT checked into this commit — Phase G's
+// recording step is a manual op the maintainer runs once they have a
+// real GEMINI_API_KEY. Until then, the test skips cleanly via the
+// geminiIngestClient cassette-gate.
+func TestUpdateExistingHappyPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping cassette test in -short mode")
+	}
+	if _, err := os.Stat(filepath.Join("..", "internal", "llm", "testdata", "cassettes", "TestUpdateExistingHappyPath__001.json")); os.IsNotExist(err) {
+		t.Skip("cassette not recorded; run with LLMWIKI_RECORD=1 GEMINI_API_KEY=... go test ./cmd/ -run TestUpdateExistingHappyPath to record")
+	}
+	client := geminiIngestClient(t, "TestUpdateExistingHappyPath")
+	if client == nil {
+		return // helper already called t.Skip
+	}
+
+	root := t.TempDir()
+	wikiDir := filepath.Join(root, "wiki")
+	rawDir := filepath.Join(root, "raw")
+	for _, d := range []string{wikiDir, rawDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	database, err := db.Open(filepath.Join(root, "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	cfg := wiki.IngestSourceConfig{WikiDir: wikiDir, RawDir: rawDir, RespectGitignore: true}
+
+	// Pre-seed five sources, ingesting each so the resulting pages
+	// have real evidence rows (the candidate-shortlist path joins
+	// FTS against page bodies AND walks evidence to find on-disk
+	// source files for the validator's union check).
+	type seedSource struct {
+		name string
+		body string
+	}
+	seedSources := []seedSource{
+		{"goroutine-scheduling.md", "Goroutine scheduling balances work across P's via the runtime's run queue.\nA blocked goroutine yields its M to another runnable goroutine.\n"},
+		{"channel-internals.md", "Channel internals use a circular buffer for buffered sends.\nUnbuffered channels rendezvous sender and receiver directly.\n"},
+		{"memory-model.md", "The Go memory model formalizes happens-before through synchronisation primitives.\nReads of an unsynchronised variable can observe stale writes.\n"},
+		{"context-propagation.md", "Context propagation carries deadlines and cancellation across API boundaries.\nA cancelled parent context cancels every child context.\n"},
+		{"interface-tables.md", "Interface tables map method sets to concrete type implementations.\nA nil concrete with a non-nil interface header is a common bug.\n"},
+	}
+	for _, s := range seedSources {
+		path := filepath.Join(root, s.name)
+		if err := os.WriteFile(path, []byte(s.body), 0644); err != nil {
+			t.Fatalf("write seed %s: %v", s.name, err)
+		}
+		if _, err := wiki.IngestSource(context.Background(), cfg, database, client, path, wiki.IngestOptions{}); err != nil {
+			t.Fatalf("seed IngestSource %s: %v", s.name, err)
+		}
+	}
+
+	// Snapshot the pre-update set of titles so we can assert
+	// UpdatedTitles is a subset of size 3.
+	preTitlesRows, err := database.AllPageTitles()
+	if err != nil {
+		t.Fatalf("AllPageTitles pre: %v", err)
+	}
+	preTitles := map[string]bool{}
+	for _, tt := range preTitlesRows {
+		preTitles[tt] = true
+	}
+	if len(preTitles) < 3 {
+		t.Fatalf("pre-seed produced only %d pages; cassette may be stale", len(preTitles))
+	}
+
+	// Ingest the sixth, overlapping source with --update-existing.
+	// The cassette pins which three pre-existing pages get updated
+	// based on the LLM's FTS-shortlisted-candidate selection.
+	sixthPath := filepath.Join(root, "overlap.md")
+	sixthBody := "Goroutine scheduling cooperates with channel internals during contention.\n" +
+		"The Go memory model interacts with channel internals to provide synchronisation.\n" +
+		"Goroutine scheduling decisions affect context propagation deadlines.\n"
+	if err := os.WriteFile(sixthPath, []byte(sixthBody), 0644); err != nil {
+		t.Fatalf("write sixth source: %v", err)
+	}
+
+	res, err := wiki.IngestSource(context.Background(), cfg, database, client, sixthPath, wiki.IngestOptions{
+		UpdateExisting: true,
+	})
+	if err != nil {
+		t.Fatalf("IngestSource (sixth, update_existing=true): %v", err)
+	}
+
+	if res.PagesUpdated != 3 {
+		t.Errorf("PagesUpdated = %d, want 3", res.PagesUpdated)
+	}
+	if res.PagesUpdateFailed != 0 {
+		t.Errorf("PagesUpdateFailed = %d, want 0", res.PagesUpdateFailed)
+	}
+	if len(res.UpdatedTitles) != 3 {
+		t.Errorf("UpdatedTitles len = %d, want 3 (got %v)", len(res.UpdatedTitles), res.UpdatedTitles)
+	}
+	for _, ut := range res.UpdatedTitles {
+		if !preTitles[ut] {
+			t.Errorf("UpdatedTitles entry %q is not a pre-existing page title", ut)
+		}
+	}
+
+	// page_update_log: 3 outcome='updated' rows for the three updated
+	// titles, 0 outcome='failed' rows for them.
+	for _, title := range res.UpdatedTitles {
+		rec, err := database.GetPage(title)
+		if err != nil || rec == nil {
+			t.Fatalf("GetPage %q: %v (rec=%v)", title, err, rec)
+		}
+		entries, err := database.GetPageUpdateLog(rec.ID, 10)
+		if err != nil {
+			t.Fatalf("GetPageUpdateLog %q: %v", title, err)
+		}
+		var updatedRows, failedRows int
+		for _, e := range entries {
+			switch e.Outcome {
+			case "updated":
+				updatedRows++
+			case "failed":
+				failedRows++
+			}
+		}
+		if updatedRows != 1 {
+			t.Errorf("page %q: updated rows = %d, want 1", title, updatedRows)
+		}
+		if failedRows != 0 {
+			t.Errorf("page %q: failed rows = %d, want 0", title, failedRows)
+		}
+	}
+
+	// Trust property: every quote on every updated page substring-
+	// matches some file in (sixth-source + the page's prior source
+	// files). Build the union per-page from the DB.
+	sixthFiles := []ingest.SourceFile{ingest.NewSourceFile(filepath.Base(sixthPath), []byte(sixthBody))}
+	for _, title := range res.UpdatedTitles {
+		path := filepath.Join(wikiDir, title+".md")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", title, err)
+		}
+		page, err := wiki.ParsePage(string(raw))
+		if err != nil {
+			t.Fatalf("parse %s: %v", title, err)
+		}
+		// Prior sources: walk the page's evidence rows in DB and
+		// load their source-file contents from disk.
+		rec, _ := database.GetPage(title)
+		ev, err := database.GetEvidenceForPage(rec.ID)
+		if err != nil {
+			t.Fatalf("GetEvidenceForPage %q: %v", title, err)
+		}
+		union := append([]ingest.SourceFile{}, sixthFiles...)
+		seenSrc := map[int64]bool{}
+		seenFile := map[string]bool{}
+		for _, e := range ev {
+			if seenSrc[e.SourceID] {
+				continue
+			}
+			seenSrc[e.SourceID] = true
+			files, err := database.GetSourceFiles(e.SourceID)
+			if err != nil {
+				continue
+			}
+			for _, sf := range files {
+				if seenFile[sf.RelativePath] {
+					continue
+				}
+				seenFile[sf.RelativePath] = true
+				// Locate on disk: seed/sixth sources live at root/<name>.
+				diskPath := filepath.Join(root, sf.RelativePath)
+				if body, err := os.ReadFile(diskPath); err == nil {
+					union = append(union, ingest.NewSourceFile(sf.RelativePath, body))
+				}
+			}
+		}
+		for _, e := range page.Evidence {
+			matched := false
+			for _, f := range union {
+				if strings.Contains(f.Content, e.Quote) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				t.Errorf("trust property violated: page %q quote %q does not substring-match any file in the (new + prior) source union",
+					title, e.Quote)
+			}
+		}
+	}
+}
