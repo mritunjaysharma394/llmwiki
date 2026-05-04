@@ -46,6 +46,7 @@ var schemaValidateCmd = &cobra.Command{
 func init() {
 	schemaShowCmd.Flags().Bool("bundled", false, "ignore AGENTS.md / CLAUDE.md and print the bundled default")
 	schemaShowCmd.Flags().Bool("doc", false, "print AGENTS.md / CLAUDE.md verbatim (or notice if absent)")
+	schemaShowCmd.Flags().Bool("hash", false, "print only the active schema's sha256 hex hash (scriptable; useful for comparing across wikis sharing a schema)")
 	schemaCmd.AddCommand(schemaShowCmd)
 	schemaCmd.AddCommand(schemaValidateCmd)
 	rootCmd.AddCommand(schemaCmd)
@@ -62,6 +63,14 @@ func schemaPathLabel(s schema.Schema) string {
 }
 
 func runSchemaShow(cmd *cobra.Command, args []string) error {
+	hash, _ := cmd.Flags().GetBool("hash")
+	if hash {
+		// Scriptable one-liner: just the hex hash + newline. Mitigates
+		// spec Risk #3 — a team co-edits a single schema doc and copies
+		// it across N wikis; this lets them script the comparison.
+		fmt.Println(activeSchema.Hash())
+		return nil
+	}
 	bundled, _ := cmd.Flags().GetBool("bundled")
 	doc, _ := cmd.Flags().GetBool("doc")
 	switch {

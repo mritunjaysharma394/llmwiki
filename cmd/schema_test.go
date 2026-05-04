@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -38,7 +40,7 @@ func captureSchemaStdout(t *testing.T, fn func() error) (string, error) {
 // process, so a previous test's --bundled would leak otherwise.
 func resetSchemaShowFlags(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{"bundled", "doc"} {
+	for _, name := range []string{"bundled", "doc", "hash"} {
 		if err := schemaShowCmd.Flags().Set(name, "false"); err != nil {
 			t.Fatalf("resetting --%s: %v", name, err)
 		}
@@ -310,3 +312,50 @@ func TestSchemaValidate_AllErrorsAtOnce(t *testing.T) {
 	}
 }
 
+// TestSchemaShow_HashFlag_PrintsActiveHashOnly — write fixture
+// AGENTS.md; `schema show --hash` must emit exactly the active hex
+// hash + newline (so users can scriptably compare across wikis
+// sharing a schema, per spec Risk #3).
+func TestSchemaShow_HashFlag_PrintsActiveHashOnly(t *testing.T) {
+	chdirTemp(t)
+	resetSchemaShowFlags(t)
+	if err := os.WriteFile("AGENTS.md", []byte(validSchemaDoc), 0644); err != nil {
+		t.Fatalf("writing AGENTS.md: %v", err)
+	}
+	loadActiveSchemaForTest(t)
+	if err := schemaShowCmd.Flags().Set("hash", "true"); err != nil {
+		t.Fatalf("setting --hash: %v", err)
+	}
+	out, err := captureSchemaStdout(t, func() error {
+		return runSchemaShow(schemaShowCmd, nil)
+	})
+	if err != nil {
+		t.Fatalf("runSchemaShow: %v", err)
+	}
+	want := fmt.Sprintf("%x\n", sha256.Sum256([]byte(validSchemaDoc)))
+	if out != want {
+		t.Errorf("--hash output = %q, want %q", out, want)
+	}
+}
+
+// TestSchemaShow_HashFlag_NoAGENTSMd_PrintsBundledHash — no on-disk
+// schema doc; `schema show --hash` must emit the bundled hash, not
+// an empty string or sentinel.
+func TestSchemaShow_HashFlag_NoAGENTSMd_PrintsBundledHash(t *testing.T) {
+	chdirTemp(t)
+	resetSchemaShowFlags(t)
+	loadActiveSchemaForTest(t)
+	if err := schemaShowCmd.Flags().Set("hash", "true"); err != nil {
+		t.Fatalf("setting --hash: %v", err)
+	}
+	out, err := captureSchemaStdout(t, func() error {
+		return runSchemaShow(schemaShowCmd, nil)
+	})
+	if err != nil {
+		t.Fatalf("runSchemaShow: %v", err)
+	}
+	want := schema.Bundled().Hash() + "\n"
+	if out != want {
+		t.Errorf("--hash bundled output = %q, want %q", out, want)
+	}
+}
