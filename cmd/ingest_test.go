@@ -1,11 +1,15 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
+	"github.com/mritunjaysharma394/llmwiki/internal/wiki"
 )
 
 func TestSlugifyForArchive(t *testing.T) {
@@ -218,6 +222,138 @@ func TestSplitCSV(t *testing.T) {
 func TestIngestFlagNoRechunkRegistered(t *testing.T) {
 	if ingestCmd.Flags().Lookup("no-rechunk") == nil {
 		t.Fatal("--no-rechunk flag not registered")
+	}
+}
+
+// realCassetteDir returns the absolute path to the canonical cassette dir
+// (internal/llm/testdata/cassettes), resolved while the test process is still
+// in its package working directory (cmd/). Callers chdir afterwards.
+func realCassetteDir(t *testing.T) string {
+	t.Helper()
+	abs, err := filepath.Abs(filepath.Join("..", "internal", "llm", "testdata", "cassettes"))
+	if err != nil {
+		t.Fatalf("resolving cassette dir: %v", err)
+	}
+	return abs
+}
+
+// linkCassettesIntoCwd makes the relative path "internal/llm/testdata/cassettes"
+// (which loadConfig hardcodes when it constructs CassetteClient via the
+// LLMWIKI_CASSETTE env var) resolve to the real cassette dir from inside a
+// chdir'd tempdir. Lets runIngest go through loadConfig unmodified while still
+// reading/writing the canonical fixture path.
+func linkCassettesIntoCwd(t *testing.T, realDir string) {
+	t.Helper()
+	parent := filepath.Join("internal", "llm", "testdata")
+	if err := os.MkdirAll(parent, 0755); err != nil {
+		t.Fatalf("mkdir cassette parent: %v", err)
+	}
+	link := filepath.Join(parent, "cassettes")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatalf("symlink cassettes: %v", err)
+	}
+}
+
+// runIngestThroughLoadConfig wires up the test to invoke runIngest the same
+// way the CLI does: write a config.toml, set env, call loadConfig (which
+// builds the LLM client + opens the db + wraps with CassetteClient), then run
+// runIngest on a synthetic source file. Assertions live in the caller.
+//
+// The cassette layer wraps the parsed CompleteStructured output (a
+// map[string]any), not raw HTTP — so a "cheap provider" cassette is byte-for-
+// byte interchangeable with the Anthropic one. The point of these tests is to
+// prove the new wiring (provider plumbing, env-var resolution, OpenAI-compat
+// base_url config) doesn't break the validator contract that evidence quotes
+// substring-match the source.
+func runIngestThroughLoadConfig(t *testing.T, source string, configBody string) []wiki.Page {
+	t.Helper()
+	chdirTemp(t)
+	resetProviderFlags(t)
+	linkCassettesIntoCwd(t, realCassetteDir(t))
+	writeMinimalConfig(t, configBody)
+
+	srcPath := filepath.Join(t.TempDir(), "source.md")
+	if err := os.WriteFile(srcPath, []byte(source), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	if err := loadConfig(); err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+
+	// Snapshot --force so other tests aren't affected.
+	t.Cleanup(func() {
+		ingestCmd.Flags().Set("force", "false")
+		ingestCmd.Flags().Set("max-file-bytes", "0")
+		ingestCmd.Flags().Set("include", "")
+		ingestCmd.Flags().Set("exclude", "")
+		ingestCmd.Flags().Set("no-gitignore", "false")
+	})
+
+	if err := runIngest(ingestCmd, []string{srcPath}); err != nil {
+		t.Fatalf("runIngest: %v", err)
+	}
+
+	entries, err := os.ReadDir(cfg.Wiki.WikiDir)
+	if err != nil {
+		t.Fatalf("read wiki dir: %v", err)
+	}
+	var pages []wiki.Page
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		p, err := wiki.ReadPage(filepath.Join(cfg.Wiki.WikiDir, e.Name()))
+		if err != nil {
+			t.Fatalf("read page %s: %v", e.Name(), err)
+		}
+		pages = append(pages, p)
+	}
+	return pages
+}
+
+// TestIngestGemini exercises the full ingest pipeline through the Gemini
+// provider, using a recorded cassette for replay. The validator contract is
+// provider-agnostic: every page's evidence quote must substring-match the
+// source content, regardless of which model produced the structured output.
+//
+// The cassette is replayed by the CassetteClient that loadConfig wraps around
+// the real GeminiClient when LLMWIKI_CASSETTE is set; the API key is a
+// sentinel value the cassette layer ignores in replay mode.
+func TestIngestGemini(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping cassette test in -short mode")
+	}
+	cassette := filepath.Join(realCassetteDir(t), "TestIngestGemini__001.json")
+	if _, err := os.Stat(cassette); os.IsNotExist(err) {
+		t.Skip("cassette not recorded; run with LLMWIKI_RECORD=1 GEMINI_API_KEY=... to record")
+	}
+	t.Setenv("LLMWIKI_CASSETTE", "TestIngestGemini")
+	t.Setenv("GEMINI_API_KEY", "test-key-for-replay")
+
+	source := "Goroutines are lightweight threads of execution managed by the Go runtime.\nThe `go` keyword starts a goroutine.\nGoroutines communicate via channels.\n"
+	configBody := `[llm]
+provider = "gemini"
+model = "gemini-2.0-flash"
+
+[wiki]
+wiki_dir = ".llmwiki/wiki"
+raw_dir = ".llmwiki/raw"
+db_path = ".llmwiki/wiki.db"
+`
+	pages := runIngestThroughLoadConfig(t, source, configBody)
+	if len(pages) == 0 {
+		t.Fatal("got 0 pages")
+	}
+	for _, p := range pages {
+		if len(p.Evidence) == 0 {
+			t.Errorf("page %q has no evidence", p.Title)
+		}
+		for _, e := range p.Evidence {
+			if !strings.Contains(source, e.Quote) {
+				t.Errorf("page %q evidence quote not in source: %q", p.Title, e.Quote)
+			}
+		}
 	}
 }
 
