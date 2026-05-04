@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
 	"github.com/mritunjaysharma394/llmwiki/internal/wiki"
@@ -291,6 +292,157 @@ func TestIngestRepo(t *testing.T) {
 			if !knownPaths[e.SourceFilePath] {
 				t.Errorf("page %q evidence source_file %q not among walked files", p.Title, e.SourceFilePath)
 			}
+		}
+	}
+}
+
+// geminiIngestClient builds a cassette wrapping a real Gemini client when
+// LLMWIKI_RECORD=1 with GEMINI_API_KEY set; otherwise pure replay against
+// the named cassette. Sister of integrationClient (which targets the
+// Anthropic provider). Sub-project 6a Phase G uses Gemini Flash as the
+// recording target so cassette refresh stays free; the resolved Q2 also
+// notes contradiction-detection calls inherit cfg.LLM.Model so the
+// contradiction cassette must record against the same provider.
+//
+// Returns nil on missing-cassette in replay mode, after calling t.Skip;
+// callers should defensive-check for nil and bail.
+func geminiIngestClient(t *testing.T, name string) llm.Client {
+	t.Helper()
+	cassetteDir := filepath.Join("..", "internal", "llm", "testdata", "cassettes")
+	mode := llm.ModeReplay
+	var upstream llm.Client
+	if os.Getenv("LLMWIKI_RECORD") != "" {
+		if os.Getenv("GEMINI_API_KEY") == "" {
+			t.Fatal("LLMWIKI_RECORD set but GEMINI_API_KEY missing")
+		}
+		upstream = llm.NewGeminiClient("gemini-2.0-flash")
+		mode = llm.ModeRecord
+	}
+	if mode == llm.ModeReplay {
+		matches, _ := filepath.Glob(filepath.Join(cassetteDir, name+"__*.json"))
+		if len(matches) == 0 {
+			t.Skipf("cassette not recorded; run with LLMWIKI_RECORD=1 GEMINI_API_KEY=... go test ./cmd/ -run %s to record", name)
+			return nil
+		}
+	}
+	return llm.NewCassetteClient(upstream, cassetteDir, name, mode)
+}
+
+// TestRetroLinkAfterIngest pre-seeds three existing pages whose bodies
+// mention the title "Mutex" in bare prose, then ingests a synthetic
+// source whose generated page is titled "Mutex". Asserts:
+//
+//   - all three pre-existing page bodies on disk now contain [[Mutex]];
+//   - their content_hash on the disk frontmatter changed (the retro-
+//     link rewrite recomputes the hash from the new body);
+//   - IngestRunResult.RetroLinkedPages == 3.
+//
+// The cassette wraps Gemini Flash (cfg.LLM.Model = "gemini-2.0-flash")
+// so cassette refresh stays cheap. Sister to the unit test
+// internal/wiki.TestIngestSource_RetroLinksExistingPages, but exercises
+// the full disk-write path through a real LLM-shaped response.
+func TestRetroLinkAfterIngest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping cassette test in -short mode")
+	}
+	client := geminiIngestClient(t, "TestRetroLinkAfterIngest")
+	if client == nil {
+		return // helper already called t.Skip
+	}
+
+	root := t.TempDir()
+	wikiDir := filepath.Join(root, "wiki")
+	rawDir := filepath.Join(root, "raw")
+	for _, d := range []string{wikiDir, rawDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	database, err := db.Open(filepath.Join(root, "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	// Placeholder source so seeded pages have a SourceID FK.
+	srcID, err := database.UpsertSource("test://seed", "h-seed")
+	if err != nil {
+		t.Fatalf("UpsertSource seed: %v", err)
+	}
+
+	// Pre-seed three existing pages mentioning "Mutex" in bare prose.
+	type seed struct{ title, body string }
+	seeds := []seed{
+		{"Goroutine Scheduling", "Goroutine Scheduling sometimes interacts with Mutex during contention.\n"},
+		{"Channel Internals", "Channel Internals never blocks on Mutex in the fast path.\n"},
+		{"Memory Model", "The Go Memory Model formalizes happens-before via Mutex acquisition.\n"},
+	}
+	preHashes := map[string]string{}
+	for _, s := range seeds {
+		page := wiki.Page{
+			Title:       s.title,
+			Body:        s.body,
+			ContentHash: wiki.HashContent(s.body),
+			SourceIDs:   []int64{srcID},
+		}
+		preHashes[s.title] = page.ContentHash
+		if err := wiki.WritePage(page, wikiDir); err != nil {
+			t.Fatalf("seed WritePage %s: %v", s.title, err)
+		}
+		if err := database.UpsertPage(db.PageRecord{
+			Title:       s.title,
+			Path:        filepath.Join(wikiDir, s.title+".md"),
+			Body:        s.body,
+			ContentHash: page.ContentHash,
+			SourceIDs:   []int64{srcID},
+		}); err != nil {
+			t.Fatalf("seed UpsertPage %s: %v", s.title, err)
+		}
+	}
+
+	// Synthetic source the new "Mutex" page is ingested from. The cassette
+	// records the LLM call against this exact byte stream; recording must
+	// produce a page titled "Mutex" with at least one quote substring-
+	// matching this content.
+	srcPath := filepath.Join(root, "mutex.md")
+	srcBody := "Mutex coordinates exclusive access to shared state.\nA Mutex protects critical sections from concurrent goroutines.\n"
+	if err := os.WriteFile(srcPath, []byte(srcBody), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	cfg := wiki.IngestSourceConfig{
+		WikiDir:          wikiDir,
+		RawDir:           rawDir,
+		RespectGitignore: true,
+	}
+	res, err := wiki.IngestSource(context.Background(), cfg, database, client, srcPath, wiki.IngestOptions{})
+	if err != nil {
+		t.Fatalf("IngestSource: %v", err)
+	}
+	if res.PagesWritten == 0 {
+		t.Fatalf("PagesWritten = 0; cassette may be stale")
+	}
+	if res.RetroLinkedPages != 3 {
+		t.Errorf("RetroLinkedPages = %d, want 3", res.RetroLinkedPages)
+	}
+
+	// All three seeded pages on disk now contain [[Mutex]] AND their
+	// content_hash changed (the retro-link rewrite recomputes hash).
+	for _, s := range seeds {
+		path := filepath.Join(wikiDir, s.title+".md")
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", s.title, err)
+		}
+		if !strings.Contains(string(body), "[[Mutex]]") {
+			t.Errorf("page %s missing [[Mutex]] after retro-link:\n%s", s.title, body)
+		}
+		page, err := wiki.ParsePage(string(body))
+		if err != nil {
+			t.Fatalf("parse %s: %v", s.title, err)
+		}
+		if page.ContentHash == preHashes[s.title] {
+			t.Errorf("page %s content_hash unchanged after retro-link: %s", s.title, page.ContentHash)
 		}
 	}
 }
