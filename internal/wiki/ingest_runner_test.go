@@ -8,9 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
+	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
 	"github.com/mritunjaysharma394/llmwiki/internal/llm"
 )
 
@@ -403,5 +406,403 @@ func TestIngestSource_ContradictionLLMFailureDoesNotBlockIngest(t *testing.T) {
 	// WARN on stderr.
 	if !strings.Contains(stderrText, "WARN") {
 		t.Errorf("expected WARN on stderr; got %q", stderrText)
+	}
+}
+
+// updateSeamCall captures one invocation of the package-level
+// updateExistingFn seam: the order index (0,1,2... by call), the
+// sourceID, the new titles, the source-file paths, and the options
+// the runner constructed.
+type updateSeamCall struct {
+	order      int
+	sourceID   int64
+	newTitles  []string
+	srcPaths   []string
+	opts       UpdateExistingOptions
+	resultRet  UpdateResult
+	errRet     error
+}
+
+// installUpdateSeamRecorder swaps updateExistingFn for a recording stub
+// returning the supplied result/err. Restores the original on cleanup.
+// The recorder also records call ordering relative to a counter that
+// can be incremented by other seams (e.g. RegenerateIndex) so tests
+// can assert ordering across phases.
+type updateSeamRecorder struct {
+	mu         sync.Mutex
+	calls      []*updateSeamCall
+	counter    *int
+	resultRet  UpdateResult
+	errRet     error
+}
+
+func (r *updateSeamRecorder) record(
+	ctx context.Context,
+	cfg IngestSourceConfig,
+	database *db.DB,
+	client llm.Client,
+	sourceID int64,
+	newSourceFiles []ingest.SourceFile,
+	newPageTitles []string,
+	opts UpdateExistingOptions,
+) (UpdateResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	srcPaths := make([]string, len(newSourceFiles))
+	for i, f := range newSourceFiles {
+		srcPaths[i] = f.RelativePath
+	}
+	titlesCopy := append([]string{}, newPageTitles...)
+	*r.counter++
+	c := &updateSeamCall{
+		order:     *r.counter,
+		sourceID:  sourceID,
+		newTitles: titlesCopy,
+		srcPaths:  srcPaths,
+		opts:      opts,
+		resultRet: r.resultRet,
+		errRet:    r.errRet,
+	}
+	r.calls = append(r.calls, c)
+	return r.resultRet, r.errRet
+}
+
+// installSeams swaps updateExistingFn (and wraps detectIngestContradictionsFn
+// + regenerateIndexFn) so tests can assert call ordering. Returns a
+// shared counter pointer the caller can read after IngestSource returns
+// and a teardown function to restore originals.
+type ingestSeamHarness struct {
+	updateRec     *updateSeamRecorder
+	contraOrder   int
+	indexOrder    int
+	counter       int
+}
+
+func installIngestSeams(t *testing.T, upRes UpdateResult, upErr error) *ingestSeamHarness {
+	t.Helper()
+	h := &ingestSeamHarness{}
+	h.updateRec = &updateSeamRecorder{
+		counter:   &h.counter,
+		resultRet: upRes,
+		errRet:    upErr,
+	}
+	origUpdate := updateExistingFn
+	origContra := detectIngestContradictionsFn
+	origIndex := regenerateIndexFn
+	updateExistingFn = h.updateRec.record
+	detectIngestContradictionsFn = func(
+		ctx context.Context,
+		client llm.Client,
+		newPages []Page,
+		existingPages []db.PageRecord,
+		candidateLimit int,
+		database *db.DB,
+	) ([]Contradiction, error) {
+		h.counter++
+		h.contraOrder = h.counter
+		return origContra(ctx, client, newPages, existingPages, candidateLimit, database)
+	}
+	regenerateIndexFn = func(wikiDir string, recs []db.PageRecord, srcs []db.Source, ts time.Time) error {
+		h.counter++
+		h.indexOrder = h.counter
+		return origIndex(wikiDir, recs, srcs, ts)
+	}
+	t.Cleanup(func() {
+		updateExistingFn = origUpdate
+		detectIngestContradictionsFn = origContra
+		regenerateIndexFn = origIndex
+	})
+	return h
+}
+
+// setupBasicIngestEnv pre-seeds an empty wiki + DB and a small source
+// file that the fakeIngestPagesClient stub can ingest into a single
+// page titled "Mutex".
+func setupBasicIngestEnv(t *testing.T) (cfg IngestSourceConfig, database *db.DB, srcPath string) {
+	t.Helper()
+	root := t.TempDir()
+	wikiDir := filepath.Join(root, "wiki")
+	rawDir := filepath.Join(root, "raw")
+	for _, d := range []string{wikiDir, rawDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	database, err := db.Open(filepath.Join(root, "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	srcPath = filepath.Join(root, "mutex.md")
+	srcBody := "Mutex coordinates access to shared state.\n"
+	if err := os.WriteFile(srcPath, []byte(srcBody), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	cfg = IngestSourceConfig{WikiDir: wikiDir, RawDir: rawDir, RespectGitignore: true}
+	return cfg, database, srcPath
+}
+
+// TestIngestSource_UpdateExistingFlagOff_DoesNotCallUpdate — the seam
+// must never fire when opts.UpdateExisting is false (the default).
+func TestIngestSource_UpdateExistingFlagOff_DoesNotCallUpdate(t *testing.T) {
+	cfg, database, srcPath := setupBasicIngestEnv(t)
+	h := installIngestSeams(t, UpdateResult{}, nil)
+	client := &fakeIngestPagesClient{
+		titleOverride: "Mutex",
+		body:          "Body about Mutex.",
+		quote:         "Mutex coordinates access to shared state.",
+	}
+	_, err := IngestSource(context.Background(), cfg, database, client, srcPath, IngestOptions{})
+	if err != nil {
+		t.Fatalf("IngestSource: %v", err)
+	}
+	if len(h.updateRec.calls) != 0 {
+		t.Errorf("update seam fired %d time(s); want 0", len(h.updateRec.calls))
+	}
+}
+
+// TestIngestSource_UpdateExistingFlagOn_CallsUpdateBetweenContradictionsAndIndex
+// asserts the call fires AFTER the contradiction pass and BEFORE the
+// index regeneration.
+func TestIngestSource_UpdateExistingFlagOn_CallsUpdateBetweenContradictionsAndIndex(t *testing.T) {
+	cfg, database, srcPath := setupBasicIngestEnv(t)
+	h := installIngestSeams(t, UpdateResult{}, nil)
+	client := &fakeIngestPagesClient{
+		titleOverride: "Mutex",
+		body:          "Body about Mutex.",
+		quote:         "Mutex coordinates access to shared state.",
+	}
+	_, err := IngestSource(context.Background(), cfg, database, client, srcPath, IngestOptions{
+		UpdateExisting: true,
+	})
+	if err != nil {
+		t.Fatalf("IngestSource: %v", err)
+	}
+	if len(h.updateRec.calls) != 1 {
+		t.Fatalf("update seam fired %d time(s); want 1", len(h.updateRec.calls))
+	}
+	updateOrder := h.updateRec.calls[0].order
+	if !(h.contraOrder > 0 && updateOrder > h.contraOrder) {
+		t.Errorf("expected update (%d) AFTER contradictions (%d)", updateOrder, h.contraOrder)
+	}
+	if !(h.indexOrder > 0 && updateOrder < h.indexOrder) {
+		t.Errorf("expected update (%d) BEFORE regenerate-index (%d)", updateOrder, h.indexOrder)
+	}
+}
+
+// TestIngestSource_UpdateExistingPropagatesIntoIngestRunResult — synthetic
+// 1-updated/1-failed batch surfaces in IngestRunResult.
+func TestIngestSource_UpdateExistingPropagatesIntoIngestRunResult(t *testing.T) {
+	cfg, database, srcPath := setupBasicIngestEnv(t)
+	upRes := UpdateResult{
+		Updated:           []string{"Stale Page"},
+		Failed:            []UpdateFailure{{Title: "Other Page", Reason: "zero-quotes-matched"}},
+		PagesUpdated:      1,
+		PagesUpdateFailed: 1,
+	}
+	installIngestSeams(t, upRes, nil)
+	client := &fakeIngestPagesClient{
+		titleOverride: "Mutex",
+		body:          "Body about Mutex.",
+		quote:         "Mutex coordinates access to shared state.",
+	}
+	res, err := IngestSource(context.Background(), cfg, database, client, srcPath, IngestOptions{
+		UpdateExisting: true,
+	})
+	if err != nil {
+		t.Fatalf("IngestSource: %v", err)
+	}
+	if res.PagesUpdated != 1 {
+		t.Errorf("PagesUpdated = %d, want 1", res.PagesUpdated)
+	}
+	if res.PagesUpdateFailed != 1 {
+		t.Errorf("PagesUpdateFailed = %d, want 1", res.PagesUpdateFailed)
+	}
+	if !equalStrSlices(res.UpdatedTitles, []string{"Stale Page"}) {
+		t.Errorf("UpdatedTitles = %v, want [Stale Page]", res.UpdatedTitles)
+	}
+	if len(res.UpdateFailures) != 1 || res.UpdateFailures[0].Title != "Other Page" {
+		t.Errorf("UpdateFailures = %+v, want one entry with Title=Other Page", res.UpdateFailures)
+	}
+}
+
+// TestIngestSource_UpdateExistingTunablesPropagated — explicit
+// IngestOptions tunables must reach the seam intact.
+func TestIngestSource_UpdateExistingTunablesPropagated(t *testing.T) {
+	cfg, database, srcPath := setupBasicIngestEnv(t)
+	h := installIngestSeams(t, UpdateResult{}, nil)
+	client := &fakeIngestPagesClient{
+		titleOverride: "Mutex",
+		body:          "Body about Mutex.",
+		quote:         "Mutex coordinates access to shared state.",
+	}
+	_, err := IngestSource(context.Background(), cfg, database, client, srcPath, IngestOptions{
+		UpdateExisting:                       true,
+		DebugUpdates:                         true,
+		UpdateExistingMaxCandidatesPerSource: 3,
+		UpdateExistingMaxCandidatesTotal:     7,
+		UpdateExistingQuoteFloor:             4,
+	})
+	if err != nil {
+		t.Fatalf("IngestSource: %v", err)
+	}
+	if len(h.updateRec.calls) != 1 {
+		t.Fatalf("update seam fired %d time(s); want 1", len(h.updateRec.calls))
+	}
+	got := h.updateRec.calls[0].opts
+	if got.MaxCandidatesPerSource != 3 {
+		t.Errorf("MaxCandidatesPerSource = %d, want 3", got.MaxCandidatesPerSource)
+	}
+	if got.MaxCandidatesTotal != 7 {
+		t.Errorf("MaxCandidatesTotal = %d, want 7", got.MaxCandidatesTotal)
+	}
+	if got.QuoteFloor != 4 {
+		t.Errorf("QuoteFloor = %d, want 4", got.QuoteFloor)
+	}
+	if !got.DebugUpdates {
+		t.Errorf("DebugUpdates = false, want true")
+	}
+}
+
+// TestIngestSource_UpdateExistingPassesSourceID — the sourceID handed to
+// the seam must match the one the runner just upserted (so
+// page_update_log.source_id is populated correctly).
+func TestIngestSource_UpdateExistingPassesSourceID(t *testing.T) {
+	cfg, database, srcPath := setupBasicIngestEnv(t)
+	h := installIngestSeams(t, UpdateResult{}, nil)
+	client := &fakeIngestPagesClient{
+		titleOverride: "Mutex",
+		body:          "Body about Mutex.",
+		quote:         "Mutex coordinates access to shared state.",
+	}
+	_, err := IngestSource(context.Background(), cfg, database, client, srcPath, IngestOptions{
+		UpdateExisting: true,
+	})
+	if err != nil {
+		t.Fatalf("IngestSource: %v", err)
+	}
+	if len(h.updateRec.calls) != 1 {
+		t.Fatalf("update seam fired %d time(s); want 1", len(h.updateRec.calls))
+	}
+	gotSourceID := h.updateRec.calls[0].sourceID
+	storedSrc, err := database.GetSource(srcPath)
+	if err != nil || storedSrc == nil {
+		t.Fatalf("GetSource(%q): err=%v rec=%v", srcPath, err, storedSrc)
+	}
+	if gotSourceID != storedSrc.ID {
+		t.Errorf("sourceID passed = %d, want %d (the source row created by IngestSource)",
+			gotSourceID, storedSrc.ID)
+	}
+	// Also: the new titles handed to the seam should be the just-written
+	// page titles.
+	if !equalStrSlices(h.updateRec.calls[0].newTitles, []string{"Mutex"}) {
+		t.Errorf("newTitles = %v, want [Mutex]", h.updateRec.calls[0].newTitles)
+	}
+}
+
+// TestIngestSource_UpdateExistingLogsSummaryLines — capture Logger output
+// and assert it contains the spec's Flow 4 summary lines for both
+// the updated and failed cases.
+func TestIngestSource_UpdateExistingLogsSummaryLines(t *testing.T) {
+	cfg, database, srcPath := setupBasicIngestEnv(t)
+	upRes := UpdateResult{
+		Updated:           []string{"Stale Page A", "Stale Page B"},
+		Failed:            []UpdateFailure{{Title: "Doomed Page", Reason: "zero-quotes-matched"}},
+		PagesUpdated:      2,
+		PagesUpdateFailed: 1,
+	}
+	installIngestSeams(t, upRes, nil)
+	client := &fakeIngestPagesClient{
+		titleOverride: "Mutex",
+		body:          "Body about Mutex.",
+		quote:         "Mutex coordinates access to shared state.",
+	}
+	var logBuf bytes.Buffer
+	_, err := IngestSource(context.Background(), cfg, database, client, srcPath, IngestOptions{
+		UpdateExisting: true,
+		Logger:         &logBuf,
+	})
+	if err != nil {
+		t.Fatalf("IngestSource: %v", err)
+	}
+	got := logBuf.String()
+	for _, want := range []string{
+		"2 page(s) updated:",
+		"~ Stale Page A",
+		"~ Stale Page B",
+		"1 page(s) update FAILED",
+		"kept at previous version",
+		"✗ Doomed Page",
+		"zero-quotes-matched",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("log output missing %q\nfull log:\n%s", want, got)
+		}
+	}
+}
+
+// TestIngestSource_UpdateExistingSecondRetroLinkPass_SeesUpdatedBodies —
+// pre-seed an existing page whose body mentions a "Stale Page" title.
+// The update seam stub returns Updated=["Stale Page"]; on disk we
+// rewrite "Stale Page"'s body to include the new "Mutex" title in
+// bare prose. After IngestSource returns, the second retro-link pass
+// (over newTitles + Updated = [Mutex, Stale Page]) must rewrite Stale
+// Page's body to wrap "Mutex" in [[wikilinks]].
+func TestIngestSource_UpdateExistingSecondRetroLinkPass_SeesUpdatedBodies(t *testing.T) {
+	cfg, database, srcPath := setupBasicIngestEnv(t)
+	// Seed Stale Page's body containing the bare-prose "Mutex" reference
+	// that the second retro-link pass should wrap.
+	srcID, err := database.UpsertSource("test://seed-pre", "h-pre")
+	if err != nil {
+		t.Fatalf("UpsertSource seed: %v", err)
+	}
+	staleBody := "Stale Page references Mutex behavior in the runtime.\n"
+	stalePath := filepath.Join(cfg.WikiDir, "Stale Page.md")
+	stalePage := Page{
+		Title:       "Stale Page",
+		Body:        staleBody,
+		ContentHash: HashContent(staleBody),
+		SourceIDs:   []int64{srcID},
+	}
+	if err := WritePage(stalePage, cfg.WikiDir); err != nil {
+		t.Fatalf("seed WritePage: %v", err)
+	}
+	if err := database.UpsertPage(db.PageRecord{
+		Title: "Stale Page", Path: stalePath, Body: staleBody,
+		ContentHash: stalePage.ContentHash, SourceIDs: []int64{srcID},
+	}); err != nil {
+		t.Fatalf("seed UpsertPage: %v", err)
+	}
+
+	// Stub the update seam to return the page as "Updated" without
+	// actually modifying the on-disk body — what we want to verify
+	// is that the second retro-link pass runs, sees Stale Page (still
+	// containing bare "Mutex"), and wraps the reference.
+	installIngestSeams(t, UpdateResult{
+		Updated:      []string{"Stale Page"},
+		PagesUpdated: 1,
+	}, nil)
+
+	client := &fakeIngestPagesClient{
+		titleOverride: "Mutex",
+		body:          "Body about Mutex.",
+		quote:         "Mutex coordinates access to shared state.",
+	}
+	res, err := IngestSource(context.Background(), cfg, database, client, srcPath, IngestOptions{
+		UpdateExisting: true,
+	})
+	if err != nil {
+		t.Fatalf("IngestSource: %v", err)
+	}
+	if res.PagesUpdated != 1 {
+		t.Errorf("PagesUpdated = %d, want 1", res.PagesUpdated)
+	}
+	staleBytes, err := os.ReadFile(stalePath)
+	if err != nil {
+		t.Fatalf("read Stale Page: %v", err)
+	}
+	if !strings.Contains(string(staleBytes), "[[Mutex]]") {
+		t.Errorf("Stale Page body missing [[Mutex]] after second retro-link pass:\n%s", staleBytes)
 	}
 }

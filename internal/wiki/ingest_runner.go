@@ -72,6 +72,17 @@ type IngestOptions struct {
 	NoGitignore  bool
 	MaxFileBytes int64
 
+	// Sub-project 6b — pillar 3 — cross-page page-update pass.
+	// UpdateExisting gates the entire pass (default off, Q11). The
+	// remaining knobs are forwarded into UpdateExistingOptions when
+	// UpdateExisting is true; zero values fall back to the package-
+	// level defaults (defaultUpdateExisting* in update_existing.go).
+	UpdateExisting                       bool
+	DebugUpdates                         bool
+	UpdateExistingMaxCandidatesPerSource int
+	UpdateExistingMaxCandidatesTotal     int
+	UpdateExistingQuoteFloor             int
+
 	// Logger receives the human-readable progress lines runIngest used to
 	// print to stdout. nil → io.Discard (the MCP handler passes nil).
 	Logger io.Writer
@@ -100,7 +111,33 @@ type IngestRunResult struct {
 	RetroLinkedPages      int
 	RetroLinkedTitles     []string
 	ContradictionsFlagged int
+
+	// Sub-project 6b — pillar 3 — cross-page page-update pass surfacing.
+	// Populated by the UpdateExistingPagesFromSource call when
+	// IngestOptions.UpdateExisting is true; cmd / MCP read these
+	// directly to render the spec's Flow 4 summary lines and to
+	// surface them on the structured response.
+	PagesUpdated      int
+	PagesUpdateFailed int
+	UpdatedTitles     []string
+	UpdateFailures    []UpdateFailure
 }
+
+// updateExistingFn is the package-level seam tests swap to record
+// the cross-page update pass's args + ordering relative to the
+// contradiction and index seams. Production callers use the real
+// UpdateExistingPagesFromSource directly.
+var updateExistingFn = UpdateExistingPagesFromSource
+
+// detectIngestContradictionsFn is the package-level seam for the
+// contradiction-detection pass. Tests use it to record call ordering;
+// production paths use the real DetectIngestContradictions.
+var detectIngestContradictionsFn = DetectIngestContradictions
+
+// regenerateIndexFn is the package-level seam for the index
+// regeneration step. Tests use it to record call ordering; production
+// paths use the real RegenerateIndex.
+var regenerateIndexFn = RegenerateIndex
 
 // IngestSource runs the full ingest pipeline and returns a structured
 // result. Mirrors what the v1.0 cmd/ingest.go runIngest body did; lifted
@@ -465,7 +502,7 @@ func IngestSource(ctx context.Context, cfg IngestSourceConfig, database *db.DB, 
 			existingNonNew = append(existingNonNew, p)
 		}
 	}
-	contras, _ := DetectIngestContradictions(ctx, client, allPages, existingNonNew, DefaultContradictionCandidateLimit, database)
+	contras, _ := detectIngestContradictionsFn(ctx, client, allPages, existingNonNew, DefaultContradictionCandidateLimit, database)
 	if len(contras) > 0 {
 		out.ContradictionsFlagged = len(contras)
 		logf("\n!! %d contradiction(s) flagged against the new pages:\n", len(contras))
@@ -480,12 +517,70 @@ func IngestSource(ctx context.Context, cfg IngestSourceConfig, database *db.DB, 
 		}
 	}
 
+	// Phase C (sub-project 6b, v0.6): cross-page page-update pass.
+	// Gated by opts.UpdateExisting. Order matters:
+	//   (1) write new pages — ABOVE
+	//   (2) retro-link existing pages to new titles — ABOVE (Phase D of 6a)
+	//   (3) detect contradictions — ABOVE (Phase E of 6a)
+	//   (4) UPDATE EXISTING PAGES — HERE (new in 6b)
+	//   (5) re-run retro-link over (new + updated) titles — BELOW
+	//   (6) regenerate index — BELOW
+	//
+	// The trust property holds at this call: UpdateExistingPagesFromSource
+	// runs ValidateAndAttachEvidence over every proposed body before any
+	// disk write; pages whose proposed body fails validation stay at
+	// their prior version (we never silently downgrade).
+	if opts.UpdateExisting {
+		// Forced candidates: any existing page that surfaced as a
+		// contradiction is auto-promoted into the candidate pool, even
+		// if its FTS score against the new source is zero. (Phase F's
+		// contradiction → update bridge — spec line 60.)
+		forcedIDs := forcedCandidatesFromContradictions(database, contras)
+		upRes, upErr := updateExistingFn(ctx, cfg, database, client, sourceID,
+			sourceFiles, newTitles, UpdateExistingOptions{
+				MaxCandidatesPerSource: opts.UpdateExistingMaxCandidatesPerSource,
+				MaxCandidatesTotal:     opts.UpdateExistingMaxCandidatesTotal,
+				QuoteFloor:             opts.UpdateExistingQuoteFloor,
+				DebugUpdates:           opts.DebugUpdates,
+				Logger:                 opts.Logger,
+				ForcedCandidateIDs:     forcedIDs,
+			})
+		if upErr != nil {
+			fmt.Fprintf(os.Stderr, "  WARN cross-page update pass: %v\n", upErr)
+		}
+		out.PagesUpdated = upRes.PagesUpdated
+		out.PagesUpdateFailed = upRes.PagesUpdateFailed
+		out.UpdatedTitles = upRes.Updated
+		out.UpdateFailures = upRes.Failed
+		if upRes.PagesUpdated > 0 {
+			logf("\n%d page(s) updated:\n", upRes.PagesUpdated)
+			for _, t := range upRes.Updated {
+				logf("  ~ %s\n", t)
+			}
+		}
+		if upRes.PagesUpdateFailed > 0 {
+			logf("\n%d page(s) update FAILED — kept at previous version:\n", upRes.PagesUpdateFailed)
+			for _, f := range upRes.Failed {
+				logf("  ✗ %s\n      %s\n", f.Title, f.Reason)
+			}
+		}
+		// (5) Second retro-link pass scoped to (new + updated) titles, so
+		// newly-rewritten bodies pick up [[wikilinks]] back to the
+		// titles introduced this batch and the existing pages that
+		// were just rewritten get linked to the same set. The pass
+		// is idempotent — pages already containing the link no-op.
+		if len(upRes.Updated) > 0 {
+			combined := append(append([]string{}, newTitles...), upRes.Updated...)
+			_, _ = RetroLinkPages(database, cfg.WikiDir, combined)
+		}
+	}
+
 	allPageRecs, err := database.AllPages()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  WARN reading pages for index: %v\n", err)
 	} else {
 		allSources, _ := database.GetAllSources()
-		if err := RegenerateIndex(cfg.WikiDir, allPageRecs, allSources, time.Now().UTC()); err != nil {
+		if err := regenerateIndexFn(cfg.WikiDir, allPageRecs, allSources, time.Now().UTC()); err != nil {
 			fmt.Fprintf(os.Stderr, "  WARN regenerating index.md: %v\n", err)
 		}
 	}
@@ -612,6 +707,16 @@ func distinctEvidenceSourceFiles(ev []Evidence) []string {
 		out = append(out, e.SourceFilePath)
 	}
 	return out
+}
+
+// forcedCandidatesFromContradictions is the contradiction-on-ingest
+// → cross-page-update bridge. Sub-project 6b Phase F (Task 9) wires
+// the bridge fully and adds the dedicated test surface; in this
+// commit it returns nil so the call site is in place but the bridge
+// is dormant. Phase F will walk contras for ExistingTitle, look up
+// each via database.GetPage, and return the deduped page IDs.
+func forcedCandidatesFromContradictions(_ *db.DB, _ []Contradiction) []int64 {
+	return nil
 }
 
 func joinComma(s []string) string {
