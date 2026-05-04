@@ -706,6 +706,16 @@ func writePageHandler(d Deps) mcpsrv.ToolHandlerFunc {
 			_ = d.DB.UpsertLinks(page.Title, links)
 		}
 
+		// Phase D (sub-project 6a): retro-link existing pages to the new
+		// title. Body-only, idempotent; evidence rows untouched. Runs
+		// BEFORE RegenerateIndex so index.md reflects the bumped
+		// updated_at on any rewritten existing pages. Failures go to
+		// stderr and don't undo the disk write.
+		retroRes, rlErr := wiki.RetroLinkPages(d.DB, d.Cfg.WikiDir, []string{page.Title})
+		if rlErr != nil {
+			fmt.Fprintf(os.Stderr, "  WARN retro-linking existing pages after mcp.write_page: %v\n", rlErr)
+		}
+
 		// 7. Side files: regenerate index, append log. Best-effort —
 		//    failures go to stderr and don't undo the disk write.
 		allPageRecs, err := d.DB.AllPages()
@@ -724,10 +734,11 @@ func writePageHandler(d Deps) mcpsrv.ToolHandlerFunc {
 		})
 
 		return jsonResult(map[string]any{
-			"title":           page.Title,
-			"path":            path,
-			"evidence_quotes": evidenceCount,
-			"sources":         sourcesList,
+			"title":              page.Title,
+			"path":               path,
+			"evidence_quotes":    evidenceCount,
+			"sources":            sourcesList,
+			"retro_linked_pages": len(retroRes.UpdatedTitles),
 		})
 	}
 }
@@ -774,11 +785,13 @@ func ingestHandler(d Deps) mcpsrv.ToolHandlerFunc {
 			return errorResult("ingest_failed", err.Error(), nil), nil
 		}
 		return jsonResult(map[string]any{
-			"source":          res.Source,
-			"pages_written":   res.PagesWritten,
-			"evidence_quotes": res.EvidenceQuotes,
-			"dropped_pages":   res.DroppedPages,
-			"skipped":         res.Skipped,
+			"source":             res.Source,
+			"pages_written":      res.PagesWritten,
+			"evidence_quotes":    res.EvidenceQuotes,
+			"dropped_pages":      res.DroppedPages,
+			"skipped":            res.Skipped,
+			"retro_linked_pages": res.RetroLinkedPages,
+			// contradictions_flagged added in Phase E
 		})
 	}
 }

@@ -765,3 +765,113 @@ func TestIngest_ForceFlag(t *testing.T) {
 		t.Errorf("force=true should re-ingest; got skipped=true (raw=%s)", text3)
 	}
 }
+
+// TestWritePage_RetroLinksExistingPages pre-seeds two pages mentioning
+// "FooBar" in bare prose, then mcp.write_page lands a new page titled
+// "FooBar". The response payload should include `retro_linked_pages: 2`
+// and both pre-existing pages on disk should now contain `[[FooBar]]`.
+// Phase D wiring of RetroLinkPages into mcp.write_page.
+func TestWritePage_RetroLinksExistingPages(t *testing.T) {
+	deps, cleanup := newTestDeps(t, nil)
+	defer cleanup()
+	if err := os.MkdirAll(deps.Cfg.WikiDir, 0755); err != nil {
+		t.Fatalf("mkdir wiki: %v", err)
+	}
+
+	content := "FooBar is the canonical identifier in our examples.\n"
+	srcPath := seedIngestedSource(t, deps, content)
+
+	// Pre-seed two existing pages mentioning FooBar in bare prose. The
+	// page-write path here goes through the DB directly so we can pin
+	// the body bytes; the write_page handler's retro-linker will then
+	// re-emit them via RetroLinkPages once the new "FooBar" page lands.
+	for _, seed := range []struct{ title, body string }{
+		{"Alpha Component", "Alpha Component depends on FooBar in two places.\n"},
+		{"Beta Component", "Beta Component refactored away from FooBar last quarter.\n"},
+	} {
+		path := filepath.Join(deps.Cfg.WikiDir, seed.title+".md")
+		// Match what wiki.WritePage would write so RetroLinkPages can
+		// ReadPage round-trip without surprises.
+		fm := "---\ntitle: " + seed.title + "\n---\n\n"
+		if err := os.WriteFile(path, []byte(fm+seed.body), 0644); err != nil {
+			t.Fatalf("seed write %s: %v", seed.title, err)
+		}
+		if err := deps.DB.UpsertPage(db.PageRecord{
+			Title: seed.title, Path: path, Body: seed.body, ContentHash: "h-" + seed.title,
+		}); err != nil {
+			t.Fatalf("seed UpsertPage %s: %v", seed.title, err)
+		}
+	}
+
+	srv := NewServer(deps)
+	c, done := connect(t, srv)
+	defer done()
+
+	res, text := callTool(t, c, "write_page", map[string]any{
+		"title": "FooBar",
+		"body":  "FooBar is canonical.",
+		"evidence": []any{
+			map[string]any{"quote": "FooBar is the canonical identifier", "source_file": srcPath},
+		},
+	})
+	if res.IsError {
+		t.Fatalf("expected success; got IsError=true, raw=%s", text)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, text)
+	}
+	rl, ok := got["retro_linked_pages"]
+	if !ok {
+		t.Fatalf("response missing retro_linked_pages key; raw=%s", text)
+	}
+	rlf, _ := rl.(float64)
+	if int(rlf) != 2 {
+		t.Errorf("retro_linked_pages = %v, want 2 (raw=%s)", rl, text)
+	}
+
+	// Disk: both seeded pages now contain [[FooBar]].
+	for _, want := range []string{"Alpha Component", "Beta Component"} {
+		body, err := os.ReadFile(filepath.Join(deps.Cfg.WikiDir, want+".md"))
+		if err != nil {
+			t.Fatalf("read %s: %v", want, err)
+		}
+		if !strings.Contains(string(body), "[[FooBar]]") {
+			t.Errorf("page %s missing [[FooBar]]:\n%s", want, body)
+		}
+	}
+}
+
+// TestIngest_ReturnShapeIncludesRetroLinkedPages drives mcp.ingest via
+// the fakeIngestClient and asserts the response payload includes a
+// `retro_linked_pages` integer key. Phase D extension of the ingest
+// handler return shape.
+func TestIngest_ReturnShapeIncludesRetroLinkedPages(t *testing.T) {
+	deps, cleanup := newTestDeps(t, &fakeIngestClient{})
+	defer cleanup()
+	if err := os.MkdirAll(deps.Cfg.WikiDir, 0755); err != nil {
+		t.Fatalf("mkdir wiki: %v", err)
+	}
+
+	tempDir := filepath.Dir(deps.Cfg.WikiDir)
+	srcPath := filepath.Join(tempDir, "ingest-src.md")
+	if err := os.WriteFile(srcPath, []byte("Goroutines are lightweight threads.\n"), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	srv := NewServer(deps)
+	c, done := connect(t, srv)
+	defer done()
+
+	res, text := callTool(t, c, "ingest", map[string]any{"source": srcPath})
+	if res.IsError {
+		t.Fatalf("ingest returned error: %s", text)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("unmarshal: %v\nraw=%s", err, text)
+	}
+	if _, ok := got["retro_linked_pages"]; !ok {
+		t.Errorf("response missing retro_linked_pages key (raw=%s)", text)
+	}
+}

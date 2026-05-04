@@ -353,6 +353,16 @@ func PromoteAnswer(ctx context.Context, cfg IngestSourceConfig, database *db.DB,
 		_ = database.UpsertLinks(page.Title, links)
 	}
 
+	// Phase D (sub-project 6a): retro-link existing pages to the new
+	// title. Body-only, idempotent; evidence rows untouched. Runs BEFORE
+	// RegenerateIndex so index.md reflects the bumped updated_at on any
+	// rewritten existing pages.
+	retroRes, rlErr := RetroLinkPages(database, cfg.WikiDir, []string{page.Title})
+	if rlErr != nil {
+		fmt.Fprintf(os.Stderr, "  WARN retro-linking existing pages after promote: %v\n", rlErr)
+	}
+	out.RetroLinkedTitles = retroRes.UpdatedTitles
+
 	// 11. Side files: regenerate index, append log unless NoSave.
 	allPageRecs, err := database.AllPages()
 	if err == nil {

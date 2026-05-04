@@ -450,3 +450,84 @@ func TestPromoteAnswer_MissingAnswerFileReturnsError(t *testing.T) {
 		t.Errorf("err = %v, want wrapping os.ErrNotExist", err)
 	}
 }
+
+// TestPromoteAnswer_RetroLinksExistingPages pre-seeds two pages whose
+// bodies mention the title "Validator Internals" in bare prose, then
+// promotes an answer whose title resolves to "Validator Internals".
+// PromoteResult.RetroLinkedTitles should contain both pre-existing
+// titles, and their bodies on disk should now contain
+// `[[Validator Internals]]`. Phase D wiring of RetroLinkPages into
+// PromoteAnswer.
+func TestPromoteAnswer_RetroLinksExistingPages(t *testing.T) {
+	source := "Line one of source.\nthe validator drops unverified quotes\nLine three.\n"
+	fx := setupPromoteFixture(t, source)
+
+	// Pre-seed two existing pages mentioning "Validator Internals" in bare prose.
+	for _, seed := range []struct{ title, body string }{
+		{"Goroutine Scheduling", "Goroutine Scheduling interacts with Validator Internals at startup.\n"},
+		{"Database Layer", "The Database Layer cooperates with Validator Internals during writes.\n"},
+	} {
+		path := filepath.Join(fx.WikiDir, seed.title+".md")
+		page := Page{
+			Title:       seed.title,
+			Body:        seed.body,
+			ContentHash: HashContent(seed.body),
+			UpdatedAt:   time.Now().UTC().Add(-time.Hour),
+			SourceIDs:   []int64{fx.SourceID},
+		}
+		if err := WritePage(page, fx.WikiDir); err != nil {
+			t.Fatalf("seed WritePage %s: %v", seed.title, err)
+		}
+		if err := fx.DB.UpsertPage(db.PageRecord{
+			Title:       seed.title,
+			Path:        path,
+			Body:        seed.body,
+			ContentHash: page.ContentHash,
+			SourceIDs:   []int64{fx.SourceID},
+		}); err != nil {
+			t.Fatalf("seed UpsertPage %s: %v", seed.title, err)
+		}
+	}
+
+	at := time.Date(2026, 5, 4, 15, 2, 8, 0, time.UTC)
+	in := SavedAnswerInput{
+		Question: "how does the validator work?",
+		Answer:   "The validator drops unverified quotes before write.",
+		Model:    "test-model",
+		Pages: []Page{{
+			Title: "Validator Internals",
+			Evidence: []Evidence{{
+				Quote:          "the validator drops unverified quotes",
+				LineStart:      2,
+				LineEnd:        2,
+				SourceFilePath: filepath.Base(fx.SourcePath),
+			}},
+		}},
+		At: at,
+	}
+	answerPath := fx.writeAnswerFile(t, in, "how-does-the-validator-work")
+
+	res, err := PromoteAnswer(context.Background(), fx.Cfg, fx.DB, &stubLLMClient{}, answerPath, PromoteOptions{Title: "Validator Internals"})
+	if err != nil {
+		t.Fatalf("PromoteAnswer: %v", err)
+	}
+	if len(res.RetroLinkedTitles) != 2 {
+		t.Fatalf("RetroLinkedTitles = %v, want 2 entries", res.RetroLinkedTitles)
+	}
+	gotSet := map[string]bool{}
+	for _, ti := range res.RetroLinkedTitles {
+		gotSet[ti] = true
+	}
+	for _, want := range []string{"Goroutine Scheduling", "Database Layer"} {
+		if !gotSet[want] {
+			t.Errorf("RetroLinkedTitles missing %q (got %v)", want, res.RetroLinkedTitles)
+		}
+		body, err := os.ReadFile(filepath.Join(fx.WikiDir, want+".md"))
+		if err != nil {
+			t.Fatalf("read %s: %v", want, err)
+		}
+		if !strings.Contains(string(body), "[[Validator Internals]]") {
+			t.Errorf("page %s body missing [[Validator Internals]] after retro-link:\n%s", want, body)
+		}
+	}
+}

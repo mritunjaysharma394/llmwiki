@@ -80,12 +80,26 @@ type IngestOptions struct {
 // IngestRunResult is what cmd and MCP both surface to their callers.
 // Skipped is true when the run was a no-op because the source's
 // content_hash matches the prior run (and Force was false).
+//
+// Sub-project 6a additions:
+//   - RetroLinkedPages: number of pre-existing pages whose bodies were
+//     rewritten to add `[[wikilink]]` references to titles written by
+//     this ingest run. Populated by the RetroLinkPages call between
+//     the persist loop and RegenerateIndex.
+//   - RetroLinkedTitles: the actual titles of those pages, in
+//     candidate-walk order; the cmd/ingest summary lists them under
+//     the "Retro-linked N existing page(s):" line.
+//   - ContradictionsFlagged: populated by Phase E (DetectIngestContradictions)
+//     once that wires in.
 type IngestRunResult struct {
-	Source         string
-	PagesWritten   int
-	EvidenceQuotes int
-	DroppedPages   int
-	Skipped        bool
+	Source                string
+	PagesWritten          int
+	EvidenceQuotes        int
+	DroppedPages          int
+	Skipped               bool
+	RetroLinkedPages      int
+	RetroLinkedTitles     []string
+	ContradictionsFlagged int
 }
 
 // IngestSource runs the full ingest pipeline and returns a structured
@@ -408,6 +422,30 @@ func IngestSource(ctx context.Context, cfg IngestSourceConfig, database *db.DB, 
 		logf("  ✓ %s (%d evidence%s)\n", allPages[i].Title, len(allPages[i].Evidence), annotation)
 	}
 	logf("Ingested %d page(s) from %s\n", len(allPages), source)
+
+	// Phase D (sub-project 6a): retro-link existing pages whose bodies
+	// mention any of the just-written titles. Body-only, idempotent,
+	// never touches evidence — the validator does not run here. Spec
+	// risk #4: at N>=500 existing pages the candidate set is FTS-filtered.
+	// Runs BEFORE RegenerateIndex so index.md picks up the bumped
+	// updated_at on rewritten existing pages.
+	newTitles := make([]string, 0, len(allPages))
+	for _, p := range allPages {
+		newTitles = append(newTitles, p.Title)
+	}
+	retroRes, rlErr := RetroLinkPages(database, cfg.WikiDir, newTitles)
+	if rlErr != nil {
+		fmt.Fprintf(os.Stderr, "  WARN retro-linking existing pages: %v\n", rlErr)
+	}
+	out.RetroLinkedPages = len(retroRes.UpdatedTitles)
+	out.RetroLinkedTitles = retroRes.UpdatedTitles
+	if len(retroRes.UpdatedTitles) > 0 {
+		logf("Retro-linked %d existing page(s) that now reference [[%s]]:\n",
+			len(retroRes.UpdatedTitles), joinComma(newTitles))
+		for _, t := range retroRes.UpdatedTitles {
+			logf("  - %s\n", t)
+		}
+	}
 
 	allPageRecs, err := database.AllPages()
 	if err != nil {
