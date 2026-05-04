@@ -24,6 +24,13 @@ type PageRecord struct {
 	ContentHash string
 	UpdatedAt   time.Time
 	SourceIDs   []int64
+	// SchemaHash is the sha256 hex of the active schema doc when this
+	// page was last written. Sub-project 7 / v0.7 added the column;
+	// pre-v5 rows carry "". Populated by every read path
+	// (GetPage / GetPageByID / AllPages / SearchPages /
+	// ListPagesByHash / ListPagesNotAtHash). Stamped post-write by
+	// db.UpdateSchemaHash from every WritePage call site.
+	SchemaHash string
 }
 
 type Link struct {
@@ -123,19 +130,19 @@ func (d *DB) UpsertPage(p PageRecord) error {
 }
 
 func (d *DB) GetPage(title string) (*PageRecord, error) {
-	row := d.sql.QueryRow(`SELECT id, title, path, body, content_hash, updated_at, source_ids FROM pages WHERE title = ?`, title)
+	row := d.sql.QueryRow(`SELECT id, title, path, body, content_hash, updated_at, source_ids, COALESCE(schema_hash, '') FROM pages WHERE title = ?`, title)
 	return scanPage(row)
 }
 
 func (d *DB) GetPageByID(id int64) (*PageRecord, error) {
-	row := d.sql.QueryRow(`SELECT id, title, path, body, content_hash, updated_at, source_ids FROM pages WHERE id = ?`, id)
+	row := d.sql.QueryRow(`SELECT id, title, path, body, content_hash, updated_at, source_ids, COALESCE(schema_hash, '') FROM pages WHERE id = ?`, id)
 	return scanPage(row)
 }
 
 func scanPage(row *sql.Row) (*PageRecord, error) {
 	var p PageRecord
 	var updatedAt, sourceIDs string
-	if err := row.Scan(&p.ID, &p.Title, &p.Path, &p.Body, &p.ContentHash, &updatedAt, &sourceIDs); err != nil {
+	if err := row.Scan(&p.ID, &p.Title, &p.Path, &p.Body, &p.ContentHash, &updatedAt, &sourceIDs, &p.SchemaHash); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -167,7 +174,7 @@ func ftsQuery(q string) string {
 
 func (d *DB) SearchPages(query string, limit int) ([]PageRecord, error) {
 	rows, err := d.sql.Query(
-		`SELECT p.id, p.title, p.path, p.body, p.content_hash, p.updated_at, p.source_ids
+		`SELECT p.id, p.title, p.path, p.body, p.content_hash, p.updated_at, p.source_ids, COALESCE(p.schema_hash, '')
 		FROM pages p
 		WHERE p.id IN (SELECT rowid FROM pages_fts WHERE pages_fts MATCH ?)
 		LIMIT ?`,
@@ -181,7 +188,7 @@ func (d *DB) SearchPages(query string, limit int) ([]PageRecord, error) {
 }
 
 func (d *DB) AllPages() ([]PageRecord, error) {
-	rows, err := d.sql.Query(`SELECT id, title, path, body, content_hash, updated_at, source_ids FROM pages`)
+	rows, err := d.sql.Query(`SELECT id, title, path, body, content_hash, updated_at, source_ids, COALESCE(schema_hash, '') FROM pages`)
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +218,7 @@ func scanPages(rows *sql.Rows) ([]PageRecord, error) {
 	for rows.Next() {
 		var p PageRecord
 		var updatedAt, sourceIDs string
-		if err := rows.Scan(&p.ID, &p.Title, &p.Path, &p.Body, &p.ContentHash, &updatedAt, &sourceIDs); err != nil {
+		if err := rows.Scan(&p.ID, &p.Title, &p.Path, &p.Body, &p.ContentHash, &updatedAt, &sourceIDs, &p.SchemaHash); err != nil {
 			return nil, err
 		}
 		p.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
@@ -446,7 +453,7 @@ func (d *DB) SearchSavedAnswers(query string, limit int) ([]SavedAnswer, error) 
 }
 
 func (d *DB) PagesWithoutEvidence() ([]PageRecord, error) {
-	rows, err := d.sql.Query(`SELECT p.id, p.title, p.path, p.body, p.content_hash, p.updated_at, p.source_ids
+	rows, err := d.sql.Query(`SELECT p.id, p.title, p.path, p.body, p.content_hash, p.updated_at, p.source_ids, COALESCE(p.schema_hash, '')
 		FROM pages p
 		LEFT JOIN evidence e ON e.page_id = p.id
 		WHERE e.id IS NULL`)
@@ -564,6 +571,83 @@ type PageUpdateLogEntry struct {
 }
 
 var ErrInvalidOutcome = errors.New("invalid outcome")
+
+// ErrPageNotFound is returned by UpdateSchemaHash when no page with the
+// given ID exists. Callers wrap this with %w in WARN logs so the
+// surrounding context (the page title and call site) is preserved.
+var ErrPageNotFound = errors.New("page not found")
+
+// UpdateSchemaHash stamps the active schema's hash onto an existing
+// pages row. Called from every WritePage write site (ingest_runner,
+// promote, update_existing, retrolink, mcp.write_page) AFTER the
+// validator-gated write has already landed on disk + DB. RowsAffected
+// == 0 surfaces ErrPageNotFound; the caller treats stamp failures as
+// non-fatal (the page already reached disk; the hash is metadata).
+func (d *DB) UpdateSchemaHash(pageID int64, hash string) error {
+	res, err := d.sql.Exec(`UPDATE pages SET schema_hash = ? WHERE id = ?`, hash, pageID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("%w: id=%d", ErrPageNotFound, pageID)
+	}
+	return nil
+}
+
+// CountPagesByHashState returns (current, prior) where current is the
+// count of pages whose schema_hash equals activeHash and prior is
+// everything else (including the empty-string default for pre-v5
+// rows). Used by cmd/lint and cmd/status's drift surface (Phase H
+// Task 13). Single SELECT with a SUM(CASE WHEN ...) so the wiki size
+// doesn't matter — one row scan, regardless.
+func (d *DB) CountPagesByHashState(activeHash string) (current, prior int, err error) {
+	err = d.sql.QueryRow(`
+		SELECT
+		  COALESCE(SUM(CASE WHEN schema_hash = ? THEN 1 ELSE 0 END), 0),
+		  COALESCE(SUM(CASE WHEN schema_hash = ? THEN 0 ELSE 1 END), 0)
+		FROM pages`, activeHash, activeHash).Scan(&current, &prior)
+	return
+}
+
+// ListPagesByHash returns up to `limit` PageRecords whose schema_hash
+// equals the given hash. Used by `schema migrate` (Phase F) for
+// progress reporting / debugging. Order: id ASC for stability across
+// runs.
+func (d *DB) ListPagesByHash(hash string, limit int) ([]PageRecord, error) {
+	rows, err := d.sql.Query(
+		`SELECT id, title, path, body, content_hash, updated_at, source_ids, COALESCE(schema_hash, '')
+		FROM pages WHERE schema_hash = ? ORDER BY id LIMIT ?`,
+		hash, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanPages(rows)
+}
+
+// ListPagesNotAtHash is the inverse of ListPagesByHash — returns up to
+// `limit` PageRecords whose schema_hash != activeHash (which includes
+// the empty-string default). Used by `llmwiki schema migrate` (Phase F
+// Task 11) to walk pages that haven't been re-stamped under the active
+// schema yet, and as the resumability seam: succeeded pages get the
+// new hash so a re-run skips them automatically.
+func (d *DB) ListPagesNotAtHash(activeHash string, limit int) ([]PageRecord, error) {
+	rows, err := d.sql.Query(
+		`SELECT id, title, path, body, content_hash, updated_at, source_ids, COALESCE(schema_hash, '')
+		FROM pages WHERE schema_hash != ? ORDER BY id LIMIT ?`,
+		activeHash, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanPages(rows)
+}
 
 var validOutcomes = map[string]bool{
 	"updated": true, "body_only": true, "failed": true, "skipped": true,

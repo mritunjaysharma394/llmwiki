@@ -65,7 +65,15 @@ type RetroLinkResult struct {
 // errors are non-fatal — they fall through to the full-scan candidate set
 // for that title, so a missing or sick FTS index degrades gracefully
 // instead of failing the call.
-func RetroLinkPages(database *db.DB, wikiDir string, newTitles []string) (RetroLinkResult, error) {
+//
+// Sub-project 7 / Phase D Task 8: activeSchemaHash is stamped onto every
+// rewritten page. The retro-linker writes a body-only update under the
+// active schema (the new wikilinks anchor to titles authored under the
+// same schema), so the page is "current under the active schema" by the
+// time we leave this call. An empty activeSchemaHash leaves schema_hash
+// untouched (callers that don't carry a schema yet — e.g. legacy paths
+// in tests — pass "").
+func RetroLinkPages(database *db.DB, wikiDir string, newTitles []string, activeSchemaHash string) (RetroLinkResult, error) {
 	var res RetroLinkResult
 	if len(newTitles) == 0 {
 		return res, nil
@@ -146,6 +154,17 @@ func RetroLinkPages(database *db.DB, wikiDir string, newTitles []string) (RetroL
 		if err := database.UpsertPage(rec); err != nil {
 			fmt.Fprintf(os.Stderr, "  WARN db upsert for retro-linked %s: %v\n", full.Title, err)
 			continue
+		}
+		// Sub-project 7 / Phase D Task 8: stamp active schema hash on
+		// the retro-linked page. The retro-linker doesn't run
+		// ValidateAndAttachEvidence — no claim is made, only a link
+		// is drawn — but the body now reflects an under-active-schema
+		// state, so the hash is correct. Stamp failures are
+		// non-fatal; an empty activeSchemaHash skips the stamp.
+		if activeSchemaHash != "" {
+			if err := database.UpdateSchemaHash(p.ID, activeSchemaHash); err != nil {
+				fmt.Fprintf(os.Stderr, "  WARN stamping schema_hash for retro-linked %q: %v\n", full.Title, err)
+			}
 		}
 		res.UpdatedTitles = append(res.UpdatedTitles, full.Title)
 	}

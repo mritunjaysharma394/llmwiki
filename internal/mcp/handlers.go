@@ -706,6 +706,16 @@ func writePageHandler(d Deps) mcpsrv.ToolHandlerFunc {
 		if err != nil || stored == nil {
 			return errorResult("write_failed", "re-fetching written page", nil), nil
 		}
+		// Sub-project 7 / Phase D Task 8: stamp the active schema hash on
+		// the just-written page. TRUST PROPERTY: this stamp happens AFTER
+		// ValidateAndAttachEvidence has gated the proposed body — the
+		// evidence_invalid branch above returns early and never reaches
+		// this code. For Task 8 we use schema.Bundled() as the
+		// placeholder; Phase I (Task 14) wires the active schema in via
+		// Deps.Schema. Stamp failures are non-fatal.
+		if err := d.DB.UpdateSchemaHash(stored.ID, schema.Bundled().Hash()); err != nil {
+			fmt.Fprintf(os.Stderr, "  WARN stamping schema_hash for %q: %v\n", page.Title, err)
+		}
 
 		// Map evidence rows back to source_file IDs / source IDs so
 		// InsertEvidence FKs resolve. Group by source so InsertEvidence
@@ -747,7 +757,7 @@ func writePageHandler(d Deps) mcpsrv.ToolHandlerFunc {
 		// BEFORE RegenerateIndex so index.md reflects the bumped
 		// updated_at on any rewritten existing pages. Failures go to
 		// stderr and don't undo the disk write.
-		retroRes, rlErr := wiki.RetroLinkPages(d.DB, d.Cfg.WikiDir, []string{page.Title})
+		retroRes, rlErr := wiki.RetroLinkPages(d.DB, d.Cfg.WikiDir, []string{page.Title}, schema.Bundled().Hash())
 		if rlErr != nil {
 			fmt.Fprintf(os.Stderr, "  WARN retro-linking existing pages after mcp.write_page: %v\n", rlErr)
 		}

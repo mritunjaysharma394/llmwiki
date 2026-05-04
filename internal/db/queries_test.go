@@ -2,6 +2,7 @@ package db
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -233,6 +234,196 @@ func TestGetPageUpdateLog_RespectsLimit(t *testing.T) {
 	}
 	if len(rows) != 3 {
 		t.Errorf("got %d rows, want 3", len(rows))
+	}
+}
+
+// --- Sub-project 7 (v0.7) — Phase D / Task 8 — schema_hash queries ---
+
+func TestUpdateSchemaHash_StampsRow(t *testing.T) {
+	d := mustOpen(t)
+	srcID, _ := d.UpsertSource("u", "h")
+	d.UpsertPage(PageRecord{Title: "P", Path: "p.md", Body: "b", ContentHash: "h", SourceIDs: []int64{srcID}})
+	p, _ := d.GetPage("P")
+
+	if err := d.UpdateSchemaHash(p.ID, "abc123"); err != nil {
+		t.Fatalf("UpdateSchemaHash: %v", err)
+	}
+	var got string
+	if err := d.sql.QueryRow(`SELECT schema_hash FROM pages WHERE id = ?`, p.ID).Scan(&got); err != nil {
+		t.Fatalf("SELECT schema_hash: %v", err)
+	}
+	if got != "abc123" {
+		t.Errorf("schema_hash = %q, want abc123", got)
+	}
+}
+
+func TestUpdateSchemaHash_IdempotentOnSameHash(t *testing.T) {
+	d := mustOpen(t)
+	srcID, _ := d.UpsertSource("u", "h")
+	d.UpsertPage(PageRecord{Title: "P", Path: "p.md", Body: "b", ContentHash: "h", SourceIDs: []int64{srcID}})
+	p, _ := d.GetPage("P")
+
+	if err := d.UpdateSchemaHash(p.ID, "abc123"); err != nil {
+		t.Fatalf("first UpdateSchemaHash: %v", err)
+	}
+	if err := d.UpdateSchemaHash(p.ID, "abc123"); err != nil {
+		t.Fatalf("second UpdateSchemaHash: %v", err)
+	}
+	var got string
+	d.sql.QueryRow(`SELECT schema_hash FROM pages WHERE id = ?`, p.ID).Scan(&got)
+	if got != "abc123" {
+		t.Errorf("schema_hash = %q, want abc123", got)
+	}
+}
+
+func TestUpdateSchemaHash_NonexistentPageID_ReturnsErr(t *testing.T) {
+	d := mustOpen(t)
+	err := d.UpdateSchemaHash(99999, "abc123")
+	if err == nil {
+		t.Fatal("expected error for nonexistent page ID, got nil")
+	}
+	if !errors.Is(err, ErrPageNotFound) {
+		t.Errorf("error %v does not wrap ErrPageNotFound", err)
+	}
+}
+
+func TestCountPagesByHashState_ReturnsCurrentAndPriorTuple(t *testing.T) {
+	d := mustOpen(t)
+	srcID, _ := d.UpsertSource("u", "h")
+	for i, h := range []string{"X", "X", "X", "Y", "Y"} {
+		title := "P" + string(rune('A'+i))
+		d.UpsertPage(PageRecord{Title: title, Path: title + ".md", Body: "b", ContentHash: "ch", SourceIDs: []int64{srcID}})
+		p, _ := d.GetPage(title)
+		if err := d.UpdateSchemaHash(p.ID, h); err != nil {
+			t.Fatalf("stamp %s: %v", title, err)
+		}
+	}
+	current, prior, err := d.CountPagesByHashState("X")
+	if err != nil {
+		t.Fatalf("CountPagesByHashState: %v", err)
+	}
+	if current != 3 || prior != 2 {
+		t.Errorf("current=%d, prior=%d; want 3/2", current, prior)
+	}
+}
+
+func TestCountPagesByHashState_AllAtActive_PriorIsZero(t *testing.T) {
+	d := mustOpen(t)
+	srcID, _ := d.UpsertSource("u", "h")
+	for i := 0; i < 5; i++ {
+		title := "P" + string(rune('A'+i))
+		d.UpsertPage(PageRecord{Title: title, Path: title + ".md", Body: "b", ContentHash: "ch", SourceIDs: []int64{srcID}})
+		p, _ := d.GetPage(title)
+		d.UpdateSchemaHash(p.ID, "X")
+	}
+	current, prior, err := d.CountPagesByHashState("X")
+	if err != nil {
+		t.Fatalf("CountPagesByHashState: %v", err)
+	}
+	if current != 5 || prior != 0 {
+		t.Errorf("current=%d, prior=%d; want 5/0", current, prior)
+	}
+}
+
+func TestCountPagesByHashState_NoneAtActive_CurrentIsZero(t *testing.T) {
+	d := mustOpen(t)
+	srcID, _ := d.UpsertSource("u", "h")
+	for i := 0; i < 5; i++ {
+		title := "P" + string(rune('A'+i))
+		d.UpsertPage(PageRecord{Title: title, Path: title + ".md", Body: "b", ContentHash: "ch", SourceIDs: []int64{srcID}})
+		p, _ := d.GetPage(title)
+		d.UpdateSchemaHash(p.ID, "X")
+	}
+	current, prior, err := d.CountPagesByHashState("Z")
+	if err != nil {
+		t.Fatalf("CountPagesByHashState: %v", err)
+	}
+	if current != 0 || prior != 5 {
+		t.Errorf("current=%d, prior=%d; want 0/5", current, prior)
+	}
+}
+
+func TestListPagesByHash_ReturnsMatchingRows(t *testing.T) {
+	d := mustOpen(t)
+	srcID, _ := d.UpsertSource("u", "h")
+	for i, h := range []string{"X", "X", "X", "Y", "Y"} {
+		title := "P" + string(rune('A'+i))
+		d.UpsertPage(PageRecord{Title: title, Path: title + ".md", Body: "b", ContentHash: "ch", SourceIDs: []int64{srcID}})
+		p, _ := d.GetPage(title)
+		d.UpdateSchemaHash(p.ID, h)
+	}
+	gotX, err := d.ListPagesByHash("X", 10)
+	if err != nil {
+		t.Fatalf("ListPagesByHash X: %v", err)
+	}
+	if len(gotX) != 3 {
+		t.Errorf("X count = %d, want 3", len(gotX))
+	}
+	gotY, err := d.ListPagesByHash("Y", 10)
+	if err != nil {
+		t.Fatalf("ListPagesByHash Y: %v", err)
+	}
+	if len(gotY) != 2 {
+		t.Errorf("Y count = %d, want 2", len(gotY))
+	}
+}
+
+func TestListPagesByHash_RespectsLimit(t *testing.T) {
+	d := mustOpen(t)
+	srcID, _ := d.UpsertSource("u", "h")
+	for i := 0; i < 10; i++ {
+		title := fmt.Sprintf("P%02d", i)
+		d.UpsertPage(PageRecord{Title: title, Path: title + ".md", Body: "b", ContentHash: "ch", SourceIDs: []int64{srcID}})
+		p, _ := d.GetPage(title)
+		d.UpdateSchemaHash(p.ID, "X")
+	}
+	got, err := d.ListPagesByHash("X", 3)
+	if err != nil {
+		t.Fatalf("ListPagesByHash: %v", err)
+	}
+	if len(got) != 3 {
+		t.Errorf("count = %d, want 3", len(got))
+	}
+}
+
+func TestListPagesNotAtHash_ReturnsNonMatchingRows(t *testing.T) {
+	d := mustOpen(t)
+	srcID, _ := d.UpsertSource("u", "h")
+	for i, h := range []string{"X", "X", "X", "Y", "Y"} {
+		title := "P" + string(rune('A'+i))
+		d.UpsertPage(PageRecord{Title: title, Path: title + ".md", Body: "b", ContentHash: "ch", SourceIDs: []int64{srcID}})
+		p, _ := d.GetPage(title)
+		d.UpdateSchemaHash(p.ID, h)
+	}
+	got, err := d.ListPagesNotAtHash("X", 10)
+	if err != nil {
+		t.Fatalf("ListPagesNotAtHash: %v", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("count = %d, want 2 (the Y pages)", len(got))
+	}
+	for _, p := range got {
+		if p.Title == "PA" || p.Title == "PB" || p.Title == "PC" {
+			t.Errorf("ListPagesNotAtHash X returned an X page: %q", p.Title)
+		}
+	}
+}
+
+func TestListPagesNotAtHash_RespectsLimit(t *testing.T) {
+	d := mustOpen(t)
+	srcID, _ := d.UpsertSource("u", "h")
+	for i := 0; i < 10; i++ {
+		title := fmt.Sprintf("P%02d", i)
+		d.UpsertPage(PageRecord{Title: title, Path: title + ".md", Body: "b", ContentHash: "ch", SourceIDs: []int64{srcID}})
+		p, _ := d.GetPage(title)
+		d.UpdateSchemaHash(p.ID, "Y") // every page is "not X"
+	}
+	got, err := d.ListPagesNotAtHash("X", 4)
+	if err != nil {
+		t.Fatalf("ListPagesNotAtHash: %v", err)
+	}
+	if len(got) != 4 {
+		t.Errorf("count = %d, want 4", len(got))
 	}
 }
 

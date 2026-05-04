@@ -588,3 +588,45 @@ func minRew(a, b int) int {
 	}
 	return b
 }
+
+// TestPromoteAnswer_StampsSchemaHash — synthetic promote writes one
+// page; assert the persisted row carries schema_hash equal to the
+// active schema's hash. Trust property: the stamp happens AFTER
+// ValidateAndAttachEvidence has gated the write.
+func TestPromoteAnswer_StampsSchemaHash(t *testing.T) {
+	source := "Line one.\nthe validator drops unverified quotes\nLine three.\n"
+	fx := setupPromoteFixture(t, source)
+	at := time.Date(2026, 5, 4, 15, 2, 8, 0, time.UTC)
+	in := SavedAnswerInput{
+		Question: "how does the validator work?",
+		Answer:   "The validator drops unverified quotes before write.",
+		Model:    "test-model",
+		Pages: []Page{{
+			Title: "Validator Internals",
+			Evidence: []Evidence{{
+				Quote:          "the validator drops unverified quotes",
+				LineStart:      2,
+				LineEnd:        2,
+				SourceFilePath: filepath.Base(fx.SourcePath),
+			}},
+		}},
+		At: at,
+	}
+	answerPath := fx.writeAnswerFile(t, in, "how-does-the-validator-work")
+
+	sch := schema.Bundled()
+	res, err := PromoteAnswer(context.Background(), fx.Cfg, fx.DB, &stubLLMClient{}, answerPath, PromoteOptions{
+		Title:  "Validator Internals",
+		Schema: sch,
+	})
+	if err != nil {
+		t.Fatalf("PromoteAnswer: %v", err)
+	}
+	stored, err := fx.DB.GetPage(res.Title)
+	if err != nil || stored == nil {
+		t.Fatalf("GetPage: page=%v err=%v", stored, err)
+	}
+	if stored.SchemaHash != sch.Hash() {
+		t.Errorf("schema_hash = %q, want %q", stored.SchemaHash, sch.Hash())
+	}
+}

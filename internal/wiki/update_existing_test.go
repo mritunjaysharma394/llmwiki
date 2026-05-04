@@ -1296,3 +1296,100 @@ func minInt(a, b int) int {
 	}
 	return b
 }
+
+// TestUpdateExistingPagesFromSource_StampsSchemaHashOnUpdated — happy-path
+// update. Assert schema_hash post-update equals the active schema's
+// hash. Trust property: the stamp happens AFTER the validator gate
+// has approved the proposed body.
+func TestUpdateExistingPagesFromSource_StampsSchemaHashOnUpdated(t *testing.T) {
+	existingSrc := "first existing quote here.\nsecond existing quote here.\nthird existing quote here.\n"
+	fx := setupUpdateB2Fixture(t, existingSrc)
+
+	priorBody := "Old body about widgets.\n"
+	pageID, _ := fx.seedPageB2(t, "Widget Internals", priorBody, []string{
+		"first existing quote here.",
+		"second existing quote here.",
+		"third existing quote here.",
+	})
+
+	newSrcContent := []byte("new fact one widgets and existing.\nnew fact two widgets and existing.\n")
+	newSrc := ingest.NewSourceFile("widgets-new.md", newSrcContent)
+
+	newBody := "New body covering widgets, with refinements.\n"
+	resp := llmPagesResponse("Widget Internals", newBody, []struct{ Quote, SourceFile string }{
+		{Quote: "new fact one widgets and existing.", SourceFile: "widgets-new.md"},
+		{Quote: "new fact two widgets and existing.", SourceFile: "widgets-new.md"},
+		{Quote: "first existing quote here.", SourceFile: fx.existingSourcePath},
+		{Quote: "second existing quote here.", SourceFile: fx.existingSourcePath},
+	})
+	client := &stubUpdateClient{
+		completeStructuredFn: func(ctx context.Context, system, user string, ts llm.ToolSchema) (map[string]any, error) {
+			return resp, nil
+		},
+	}
+
+	sch := schema.Bundled()
+	res, err := UpdateExistingPagesFromSource(context.Background(), fx.Cfg, fx.DB, client, fx.SourceID,
+		[]ingest.SourceFile{newSrc}, nil, UpdateExistingOptions{Schema: sch})
+	if err != nil {
+		t.Fatalf("UpdateExistingPagesFromSource: %v", err)
+	}
+	if res.PagesUpdated != 1 {
+		t.Fatalf("PagesUpdated = %d, want 1", res.PagesUpdated)
+	}
+	stored, err := fx.DB.GetPageByID(pageID)
+	if err != nil || stored == nil {
+		t.Fatalf("GetPageByID: page=%v err=%v", stored, err)
+	}
+	if stored.SchemaHash != sch.Hash() {
+		t.Errorf("schema_hash = %q, want %q", stored.SchemaHash, sch.Hash())
+	}
+}
+
+// TestUpdateExistingPagesFromSource_FailedUpdate_LeavesPriorSchemaHashUntouched
+// — validator-drop case. Pre-stamp the page with a known prior hash;
+// run the updater with quotes that won't validate; assert
+// schema_hash is unchanged (the failed page didn't reach disk, so
+// the hash that was on it before this call must persist verbatim).
+func TestUpdateExistingPagesFromSource_FailedUpdate_LeavesPriorSchemaHashUntouched(t *testing.T) {
+	existingSrc := "existing source words.\n"
+	fx := setupUpdateB2Fixture(t, existingSrc)
+	priorBody := "Body that should survive.\n"
+	pageID, _ := fx.seedPageB2(t, "Trust Page", priorBody, []string{"existing source words."})
+
+	// Pre-stamp the page with a known prior schema hash so we can
+	// assert it didn't change after the failed update.
+	priorSchemaHash := "PRIOR_SCHEMA_HASH_SENTINEL"
+	if err := fx.DB.UpdateSchemaHash(pageID, priorSchemaHash); err != nil {
+		t.Fatalf("seed UpdateSchemaHash: %v", err)
+	}
+
+	newSrc := ingest.NewSourceFile("new.md", []byte("words none of the quotes will match.\n"))
+	resp := llmPagesResponse("Trust Page", "Replacement body that won't survive.\n", []struct{ Quote, SourceFile string }{
+		{Quote: "totally invented quote A", SourceFile: "new.md"},
+		{Quote: "totally invented quote B", SourceFile: "new.md"},
+	})
+	client := &stubUpdateClient{
+		completeStructuredFn: func(ctx context.Context, system, user string, ts llm.ToolSchema) (map[string]any, error) {
+			return resp, nil
+		},
+	}
+
+	sch := schema.Bundled()
+	res, err := UpdateExistingPagesFromSource(context.Background(), fx.Cfg, fx.DB, client, fx.SourceID,
+		[]ingest.SourceFile{newSrc}, nil, UpdateExistingOptions{Schema: sch})
+	if err != nil {
+		t.Fatalf("UpdateExistingPagesFromSource: %v", err)
+	}
+	if res.PagesUpdateFailed != 1 {
+		t.Fatalf("PagesUpdateFailed = %d, want 1", res.PagesUpdateFailed)
+	}
+	stored, err := fx.DB.GetPageByID(pageID)
+	if err != nil || stored == nil {
+		t.Fatalf("GetPageByID: page=%v err=%v", stored, err)
+	}
+	if stored.SchemaHash != priorSchemaHash {
+		t.Errorf("schema_hash mutated under failed update: got %q, want %q (sentinel)",
+			stored.SchemaHash, priorSchemaHash)
+	}
+}

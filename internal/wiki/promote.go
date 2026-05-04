@@ -326,6 +326,14 @@ func PromoteAnswer(ctx context.Context, cfg IngestSourceConfig, database *db.DB,
 	if err != nil || stored == nil {
 		return out, fmt.Errorf("re-fetching written page: %v", err)
 	}
+	// Sub-project 7 / Phase D Task 8: stamp the active schema hash on
+	// the just-promoted page. TRUST PROPERTY: this stamp happens AFTER
+	// ValidateAndAttachEvidence has already gated the proposed body —
+	// answers whose quotes fail defensive re-validation return
+	// ErrEvidenceInvalid above and never reach this point.
+	if err := database.UpdateSchemaHash(stored.ID, opts.Schema.Hash()); err != nil {
+		fmt.Fprintf(os.Stderr, "  WARN stamping schema_hash for %q: %v\n", page.Title, err)
+	}
 
 	// Group evidence by source so InsertEvidence (one source per call)
 	// resolves FKs correctly.
@@ -364,7 +372,7 @@ func PromoteAnswer(ctx context.Context, cfg IngestSourceConfig, database *db.DB,
 	// title. Body-only, idempotent; evidence rows untouched. Runs BEFORE
 	// RegenerateIndex so index.md reflects the bumped updated_at on any
 	// rewritten existing pages.
-	retroRes, rlErr := RetroLinkPages(database, cfg.WikiDir, []string{page.Title})
+	retroRes, rlErr := RetroLinkPages(database, cfg.WikiDir, []string{page.Title}, opts.Schema.Hash())
 	if rlErr != nil {
 		fmt.Fprintf(os.Stderr, "  WARN retro-linking existing pages after promote: %v\n", rlErr)
 	}

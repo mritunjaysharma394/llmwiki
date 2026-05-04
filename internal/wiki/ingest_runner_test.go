@@ -1114,3 +1114,141 @@ func TestIngestSource_NoContradiction_NoForcedCandidates(t *testing.T) {
 		t.Errorf("ForcedCandidateIDs = %v, want empty (no contradictions → no forced)", got)
 	}
 }
+
+// fakeMultiPageIngestClient returns N pages on a single CompleteStructured
+// call, each with one evidence quote that substring-matches the source
+// file the validator will see. Used by the schema-hash stamp test.
+type fakeMultiPageIngestClient struct {
+	pages []struct {
+		Title string
+		Body  string
+		Quote string
+	}
+}
+
+func (f *fakeMultiPageIngestClient) Complete(ctx context.Context, system, user string) (string, error) {
+	return "[]", nil
+}
+func (f *fakeMultiPageIngestClient) CompleteStream(ctx context.Context, system, user string, w io.Writer) (string, error) {
+	return f.Complete(ctx, system, user)
+}
+func (f *fakeMultiPageIngestClient) CompleteStructured(ctx context.Context, system, user string, ts llm.ToolSchema) (map[string]any, error) {
+	path := "source"
+	for _, line := range strings.Split(user, "\n") {
+		if strings.HasPrefix(line, "=== ") && strings.HasSuffix(line, " ===") {
+			path = strings.TrimSuffix(strings.TrimPrefix(line, "=== "), " ===")
+			break
+		}
+	}
+	pages := make([]any, 0, len(f.pages))
+	for _, p := range f.pages {
+		pages = append(pages, map[string]any{
+			"title": p.Title,
+			"body":  p.Body,
+			"evidence": []any{
+				map[string]any{"quote": p.Quote, "source_file": path},
+			},
+		})
+	}
+	return map[string]any{"pages": pages}, nil
+}
+
+// TestIngestSource_StampsSchemaHashOnEveryWrittenPage — synthetic ingest
+// writes 3 pages under a fixture schema; assert all 3 rows have
+// schema_hash equal to the schema's hash post-ingest.
+func TestIngestSource_StampsSchemaHashOnEveryWrittenPage(t *testing.T) {
+	root := t.TempDir()
+	wikiDir := filepath.Join(root, "wiki")
+	rawDir := filepath.Join(root, "raw")
+	for _, d := range []string{wikiDir, rawDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	database, err := db.Open(filepath.Join(root, "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	srcPath := filepath.Join(root, "src.md")
+	srcBody := "alpha quote one matches.\nbeta quote two matches.\ngamma quote three matches.\n"
+	if err := os.WriteFile(srcPath, []byte(srcBody), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	cfg := IngestSourceConfig{WikiDir: wikiDir, RawDir: rawDir, RespectGitignore: true}
+	client := &fakeMultiPageIngestClient{
+		pages: []struct{ Title, Body, Quote string }{
+			{"Alpha Page", "Body about alpha.\n", "alpha quote one matches."},
+			{"Beta Page", "Body about beta.\n", "beta quote two matches."},
+			{"Gamma Page", "Body about gamma.\n", "gamma quote three matches."},
+		},
+	}
+
+	sch := schema.Bundled()
+	res, err := IngestSource(context.Background(), cfg, database, client, srcPath, IngestOptions{Schema: sch})
+	if err != nil {
+		t.Fatalf("IngestSource: %v", err)
+	}
+	if res.PagesWritten != 3 {
+		t.Fatalf("PagesWritten = %d, want 3", res.PagesWritten)
+	}
+	want := sch.Hash()
+	for _, title := range []string{"Alpha Page", "Beta Page", "Gamma Page"} {
+		p, err := database.GetPage(title)
+		if err != nil || p == nil {
+			t.Fatalf("GetPage %q: page=%v err=%v", title, p, err)
+		}
+		if p.SchemaHash != want {
+			t.Errorf("schema_hash for %q = %q, want %q", title, p.SchemaHash, want)
+		}
+	}
+}
+
+// TestIngestSource_ValidatorDropsPage_NoSchemaHashStamp — synthetic ingest
+// where the LLM-stubbed page's quote does NOT substring-match the source.
+// Asserts that no row exists for the dropped page (so trivially no
+// schema_hash to check). Trust property reaffirmation: bad pages don't
+// reach disk.
+func TestIngestSource_ValidatorDropsPage_NoSchemaHashStamp(t *testing.T) {
+	root := t.TempDir()
+	wikiDir := filepath.Join(root, "wiki")
+	rawDir := filepath.Join(root, "raw")
+	for _, d := range []string{wikiDir, rawDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	database, err := db.Open(filepath.Join(root, "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	srcPath := filepath.Join(root, "src.md")
+	srcBody := "real content of the source file.\n"
+	if err := os.WriteFile(srcPath, []byte(srcBody), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	cfg := IngestSourceConfig{WikiDir: wikiDir, RawDir: rawDir, RespectGitignore: true}
+	// Quote does not appear in the source; ValidateAndAttachEvidence
+	// drops every quote → page never reaches disk → no schema_hash row.
+	client := &fakeIngestPagesClient{
+		titleOverride: "Hallucinated Page",
+		body:          "Body referencing fabricated quote.\n",
+		quote:         "this string does not appear in source",
+	}
+	sch := schema.Bundled()
+	_, _ = IngestSource(context.Background(), cfg, database, client, srcPath, IngestOptions{Schema: sch})
+
+	// Trust property: page never reaches DB.
+	if got, err := database.GetPage("Hallucinated Page"); err != nil {
+		t.Fatalf("GetPage: %v", err)
+	} else if got != nil {
+		t.Errorf("dropped page reached DB: %+v (trust property violated)", got)
+	}
+	// And nothing on disk under that title.
+	if _, err := os.Stat(filepath.Join(wikiDir, "Hallucinated Page.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("dropped page reached disk: stat err = %v", err)
+	}
+}

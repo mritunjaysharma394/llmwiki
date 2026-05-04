@@ -387,6 +387,17 @@ func finishUpdateCandidate(
 			fmt.Sprintf("upsert-page-error: %v", err), 0, 0)
 		return candidateOutcome{kind: "failed", reason: fmt.Sprintf("upsert-page-error: %v", err)}
 	}
+	// Sub-project 7 / Phase D Task 8: stamp the active schema hash on
+	// the just-updated page. TRUST PROPERTY: this stamp only fires on
+	// the "updated" path — the failed / body_only / skipped branches
+	// above all return early without reaching this code, so a page
+	// whose proposed body failed the validator's substring gate keeps
+	// whatever schema_hash it had before this call (commonly its
+	// content-original hash, or '' for pre-v5 rows). Stamp failures
+	// are non-fatal.
+	if err := database.UpdateSchemaHash(cand.ID, opts.Schema.Hash()); err != nil {
+		fmt.Fprintf(os.Stderr, "  WARN stamping schema_hash for %q: %v\n", cand.Title, err)
+	}
 
 	// Swap evidence: delete-old + insert-new. We record the exact added
 	// / removed counts in the audit log.

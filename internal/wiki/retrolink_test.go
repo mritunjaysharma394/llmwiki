@@ -95,7 +95,7 @@ func TestRetroLinkPages_RewritesPagesMatchingNewTitles(t *testing.T) {
 	fx.seedPage(t, "Beta", "Beta's review of Mutex Implementation is detailed.\n")
 	fx.seedPage(t, "Gamma", "Gamma tangentially touches Mutex Implementation here.\n")
 
-	res, err := RetroLinkPages(fx.DB, fx.WikiDir, []string{"Mutex Implementation"})
+	res, err := RetroLinkPages(fx.DB, fx.WikiDir, []string{"Mutex Implementation"}, "")
 	if err != nil {
 		t.Fatalf("RetroLinkPages: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestRetroLinkPages_Idempotent(t *testing.T) {
 	fx.seedPage(t, "Alpha", "Alpha discusses Mutex Implementation in passing.\n")
 	fx.seedPage(t, "Beta", "Beta's review of Mutex Implementation is detailed.\n")
 
-	if _, err := RetroLinkPages(fx.DB, fx.WikiDir, []string{"Mutex Implementation"}); err != nil {
+	if _, err := RetroLinkPages(fx.DB, fx.WikiDir, []string{"Mutex Implementation"}, ""); err != nil {
 		t.Fatalf("first RetroLinkPages: %v", err)
 	}
 
@@ -129,7 +129,7 @@ func TestRetroLinkPages_Idempotent(t *testing.T) {
 		pre[title] = data
 	}
 
-	res, err := RetroLinkPages(fx.DB, fx.WikiDir, []string{"Mutex Implementation"})
+	res, err := RetroLinkPages(fx.DB, fx.WikiDir, []string{"Mutex Implementation"}, "")
 	if err != nil {
 		t.Fatalf("second RetroLinkPages: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestRetroLinkPages_SkipsPagesWhoseTitlesAreInNewSet(t *testing.T) {
 	fx.seedPage(t, "Mutex Implementation", "This page is about itself; no Mutex Implementation rewrite please.\n")
 	fx.seedPage(t, "Alpha", "Alpha mentions Mutex Implementation here.\n")
 
-	res, err := RetroLinkPages(fx.DB, fx.WikiDir, []string{"Mutex Implementation"})
+	res, err := RetroLinkPages(fx.DB, fx.WikiDir, []string{"Mutex Implementation"}, "")
 	if err != nil {
 		t.Fatalf("RetroLinkPages: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestRetroLinkPages_BodyOnly_EvidenceUntouched(t *testing.T) {
 		t.Fatalf("pre evidence: %v", err)
 	}
 
-	if _, err := RetroLinkPages(fx.DB, fx.WikiDir, []string{"Mutex Implementation"}); err != nil {
+	if _, err := RetroLinkPages(fx.DB, fx.WikiDir, []string{"Mutex Implementation"}, ""); err != nil {
 		t.Fatalf("RetroLinkPages: %v", err)
 	}
 
@@ -216,7 +216,7 @@ func TestRetroLinkPages_RecomputesContentHashAndUpdatedAt(t *testing.T) {
 	// granularity.
 	time.Sleep(1100 * time.Millisecond)
 
-	if _, err := RetroLinkPages(fx.DB, fx.WikiDir, []string{"Mutex Implementation"}); err != nil {
+	if _, err := RetroLinkPages(fx.DB, fx.WikiDir, []string{"Mutex Implementation"}, ""); err != nil {
 		t.Fatalf("RetroLinkPages: %v", err)
 	}
 
@@ -246,7 +246,7 @@ func TestRetroLinkPages_SkipsPagesWithNoMention(t *testing.T) {
 	fx.seedPage(t, "Alpha", "Alpha mentions Mutex Implementation here.\n")
 	fx.seedPage(t, "Beta", "Beta is unrelated, no relevant title here.\n")
 
-	res, err := RetroLinkPages(fx.DB, fx.WikiDir, []string{"Mutex Implementation"})
+	res, err := RetroLinkPages(fx.DB, fx.WikiDir, []string{"Mutex Implementation"}, "")
 	if err != nil {
 		t.Fatalf("RetroLinkPages: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestRetroLinkPages_FTSPreFilterAtThreshold(t *testing.T) {
 	preDelta, _ := os.ReadFile(PagePath(fx.WikiDir, "Delta"))
 	preEpsilon, _ := os.ReadFile(PagePath(fx.WikiDir, "Epsilon"))
 
-	res, err := RetroLinkPages(fx.DB, fx.WikiDir, []string{"Mutex Implementation"})
+	res, err := RetroLinkPages(fx.DB, fx.WikiDir, []string{"Mutex Implementation"}, "")
 	if err != nil {
 		t.Fatalf("RetroLinkPages: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestRetroLinkPages_CodeFenceStillSkipped(t *testing.T) {
 	fenced := "Intro line.\n\n```go\nMutex Implementation := struct{}\n```\n\nNo other prose here.\n"
 	fx.seedPage(t, "Alpha", fenced)
 
-	res, err := RetroLinkPages(fx.DB, fx.WikiDir, []string{"Mutex Implementation"})
+	res, err := RetroLinkPages(fx.DB, fx.WikiDir, []string{"Mutex Implementation"}, "")
 	if err != nil {
 		t.Fatalf("RetroLinkPages: %v", err)
 	}
@@ -329,7 +329,7 @@ func TestRetroLinkPages_EmptyNewTitles(t *testing.T) {
 	fx := setupRetroLinkFixture(t)
 	fx.seedPage(t, "Alpha", "Alpha mentions Mutex Implementation here.\n")
 
-	res, err := RetroLinkPages(fx.DB, fx.WikiDir, nil)
+	res, err := RetroLinkPages(fx.DB, fx.WikiDir, nil, "")
 	if err != nil {
 		t.Fatalf("RetroLinkPages: %v", err)
 	}

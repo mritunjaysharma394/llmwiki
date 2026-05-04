@@ -425,6 +425,14 @@ func IngestSource(ctx context.Context, cfg IngestSourceConfig, database *db.DB, 
 		if err != nil || stored == nil {
 			return out, fmt.Errorf("re-fetch page %q: %v", allPages[i].Title, err)
 		}
+		// Sub-project 7 / Phase D Task 8: stamp the active schema hash on
+		// the just-written page. TRUST PROPERTY: this stamp happens AFTER
+		// ValidateAndAttachEvidence has already gated the proposed body —
+		// pages that fail validation never reach this point and never
+		// receive a schema_hash. Stamp failures are non-fatal.
+		if err := database.UpdateSchemaHash(stored.ID, opts.Schema.Hash()); err != nil {
+			fmt.Fprintf(os.Stderr, "  WARN stamping schema_hash for %q: %v\n", allPages[i].Title, err)
+		}
 		var dbEv []db.Evidence
 		for _, e := range allPages[i].Evidence {
 			var sfPtr *int64
@@ -478,7 +486,7 @@ func IngestSource(ctx context.Context, cfg IngestSourceConfig, database *db.DB, 
 	for _, p := range allPages {
 		newTitles = append(newTitles, p.Title)
 	}
-	retroRes, rlErr := RetroLinkPages(database, cfg.WikiDir, newTitles)
+	retroRes, rlErr := RetroLinkPages(database, cfg.WikiDir, newTitles, opts.Schema.Hash())
 	if rlErr != nil {
 		fmt.Fprintf(os.Stderr, "  WARN retro-linking existing pages: %v\n", rlErr)
 	}
@@ -580,7 +588,7 @@ func IngestSource(ctx context.Context, cfg IngestSourceConfig, database *db.DB, 
 		// is idempotent — pages already containing the link no-op.
 		if len(upRes.Updated) > 0 {
 			combined := append(append([]string{}, newTitles...), upRes.Updated...)
-			_, _ = RetroLinkPages(database, cfg.WikiDir, combined)
+			_, _ = RetroLinkPages(database, cfg.WikiDir, combined, opts.Schema.Hash())
 		}
 	}
 
