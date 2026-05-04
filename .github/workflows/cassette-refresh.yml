@@ -20,6 +20,12 @@ jobs:
       - name: Re-record cassettes
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Optional: cheap-provider keys for TestIngestGemini /
+          # TestIngestOpenAICompat. When unset, those tests skip with
+          # "cassette not recorded" rather than failing — same skip-on-missing
+          # pattern used by all cassette tests in this repo.
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           LLMWIKI_RECORD: "1"
         run: go test ./...
       - name: Open PR if cassettes drifted
