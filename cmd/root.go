@@ -589,6 +589,7 @@ func init() {
 	rootCmd.AddCommand(lintCmd)
 	rootCmd.AddCommand(maintainCmd)
 	rootCmd.AddCommand(watchCmd)
+	rootCmd.AddCommand(captureSessionCmd)
 	rootCmd.AddCommand(mcpCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(versionCmd)
