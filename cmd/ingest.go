@@ -3,6 +3,7 @@ package cmd
 import (
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/mritunjaysharma394/llmwiki/internal/cliutil"
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 	"github.com/mritunjaysharma394/llmwiki/internal/wiki"
 	"github.com/spf13/cobra"
 )
@@ -193,6 +195,12 @@ func forceFlag(cmd *cobra.Command) bool {
 // internal/wiki so the MCP ingest handler can drive the same pipeline
 // without importing cmd/. Error cliutil-wrapping for HTTP / scanned-PDF
 // stays here because cliutil is a CLI-surface concern.
+//
+// Sub-project 8 Phase C tail: after IngestSource returns successfully,
+// run wiki.FastLint and surface orphan / missing-xref / schema-drift
+// counts on stderr. Silent when all three signals are zero (plan §4
+// "Fast lint is silent when clean"). FastLint failures are logged as a
+// stderr WARN — never failing the ingest because the tail-lint blew up.
 func runIngest(cmd *cobra.Command, args []string) error {
 	source := args[0]
 	ctx := cmd.Context()
@@ -215,7 +223,96 @@ func runIngest(cmd *cobra.Command, args []string) error {
 		}
 		return err
 	}
+
+	runTailFastLint(os.Stderr, database, activeSchema)
 	return nil
+}
+
+// runTailFastLint executes wiki.FastLint and writes the actionable
+// portions to w. Silent when all three signals are zero (plan §4 "Fast
+// lint is silent when clean"). On FastLint error, prints a WARN line
+// and returns — never failing the ingest because the tail-lint blew up.
+//
+// The output format is shared with Phase D's full-lint surface; keep
+// the wording stable so both tails grep the same way:
+//
+//	fast lint:
+//	  orphans: 4 (Pages: "Foo", "Bar", "Baz", …)
+//	  missing xrefs: 2 page(s) with bare references — "Page A" → ["Title X", "Title Y"]
+//	  schema drift: 7 pages on a prior schema (run `llmwiki schema migrate`)
+//
+// Each signal is independently gated; a one-signal-only result still
+// renders the `fast lint:` header so the surface stays greppable.
+//
+// Split out from runIngest so cmd/ingest_test.go can drive it with a
+// captured writer instead of hijacking os.Stderr globally.
+func runTailFastLint(w io.Writer, d *db.DB, sch schema.Schema) {
+	if d == nil {
+		return
+	}
+	res, err := wiki.FastLint(d, sch)
+	if err != nil {
+		fmt.Fprintf(w, "  WARN fast lint: %v\n", err)
+		return
+	}
+	if res.OrphanCount == 0 && res.MissingXRefCount == 0 && res.SchemaDriftCount == 0 {
+		return
+	}
+	fmt.Fprintln(w, "fast lint:")
+	if res.OrphanCount > 0 {
+		fmt.Fprintln(w, formatOrphanLine(res.OrphanCount, res.TopOrphanTitles))
+	}
+	if res.MissingXRefCount > 0 {
+		fmt.Fprintln(w, formatMissingXRefLine(res.MissingXRefCount, res.MissingXRefs))
+	}
+	if res.SchemaDriftCount > 0 {
+		fmt.Fprintf(w, "  schema drift: %d pages on a prior schema (run `llmwiki schema migrate`)\n",
+			res.SchemaDriftCount)
+	}
+}
+
+// formatOrphanLine renders the orphan signal:
+//
+//	  orphans: 4 (Pages: "Foo", "Bar", "Baz", …)
+//
+// The trailing "…" appears only when count > len(titles), signalling
+// that the list was capped at FastLintTopN. When count == 0 the caller
+// must not invoke this — the gating is the caller's responsibility.
+func formatOrphanLine(count int, titles []string) string {
+	parts := make([]string, 0, len(titles))
+	for _, t := range titles {
+		parts = append(parts, fmt.Sprintf("%q", t))
+	}
+	pageList := strings.Join(parts, ", ")
+	if count > len(titles) {
+		if pageList != "" {
+			pageList += ", …"
+		} else {
+			pageList = "…"
+		}
+	}
+	if pageList == "" {
+		return fmt.Sprintf("  orphans: %d", count)
+	}
+	return fmt.Sprintf("  orphans: %d (Pages: %s)", count, pageList)
+}
+
+// formatMissingXRefLine renders the missing-cross-ref signal. Picks
+// the first MissingXRef as the example so the line stays single-line.
+// When the offender list is empty (count > 0 but Phase A capped at 0
+// somehow), falls back to a count-only message; in practice MissingXRefs
+// is non-empty whenever MissingXRefCount > 0.
+func formatMissingXRefLine(count int, refs []wiki.MissingCrossRef) string {
+	if len(refs) == 0 {
+		return fmt.Sprintf("  missing xrefs: %d page(s) with bare references", count)
+	}
+	first := refs[0]
+	titles := make([]string, 0, len(first.MissingTitles))
+	for _, t := range first.MissingTitles {
+		titles = append(titles, fmt.Sprintf("%q", t))
+	}
+	return fmt.Sprintf("  missing xrefs: %d page(s) with bare references — %q → [%s]",
+		count, first.Page, strings.Join(titles, ", "))
 }
 
 // toWikiIngestConfig translates the cobra-side cmd.Config into the slim

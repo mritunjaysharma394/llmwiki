@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"sort"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/mritunjaysharma394/llmwiki/internal/db"
 	"github.com/mritunjaysharma394/llmwiki/internal/ingest"
+	"github.com/mritunjaysharma394/llmwiki/internal/schema"
 	"github.com/mritunjaysharma394/llmwiki/internal/wiki"
 )
 
@@ -630,6 +632,208 @@ func TestIngest_TunablesPropagateFromConfig(t *testing.T) {
 	}
 	if opts.UpdateExistingQuoteFloor != 5 {
 		t.Errorf("QuoteFloor = %d, want 5", opts.UpdateExistingQuoteFloor)
+	}
+}
+
+// setupTailLintDB opens a fresh wiki.db in t.TempDir and returns it. The
+// runTailFastLint tests below seed pages directly via UpsertPage so they
+// don't depend on the full ingest pipeline; FastLint reads pages from
+// the DB, on-disk frontmatter doesn't influence its three signals.
+func setupTailLintDB(t *testing.T) *db.DB {
+	t.Helper()
+	dir := t.TempDir()
+	d, err := db.Open(filepath.Join(dir, "wiki.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	return d
+}
+
+// seedTailLintPage upserts a (title, body) page tagged with schemaHash
+// (when non-empty), mirroring the fast_lint_test fixture so tail-lint
+// tests reuse the same DB shape contract.
+func seedTailLintPage(t *testing.T, d *db.DB, title, body, schemaHash string) {
+	t.Helper()
+	if err := d.UpsertPage(db.PageRecord{
+		Title:       title,
+		Path:        "wiki/" + title + ".md",
+		Body:        body,
+		ContentHash: wiki.HashContent(body),
+	}); err != nil {
+		t.Fatalf("UpsertPage %s: %v", title, err)
+	}
+	if schemaHash == "" {
+		return
+	}
+	stored, err := d.GetPage(title)
+	if err != nil || stored == nil {
+		t.Fatalf("GetPage %s: %v", title, err)
+	}
+	if err := d.UpdateSchemaHash(stored.ID, schemaHash); err != nil {
+		t.Fatalf("UpdateSchemaHash %s: %v", title, err)
+	}
+}
+
+// TestRunTailFastLint_SilentWhenClean — three pages, all wikilinked
+// properly, all on the active schema. runTailFastLint must write
+// nothing (plan §4: "Fast lint is silent when clean").
+func TestRunTailFastLint_SilentWhenClean(t *testing.T) {
+	d := setupTailLintDB(t)
+	sch := schema.Bundled()
+	h := sch.Hash()
+	seedTailLintPage(t, d, "Foo", "Body of Foo. See also [[Bar]] and [[Baz]].", h)
+	seedTailLintPage(t, d, "Bar", "Body of Bar. Refers to [[Foo]] and [[Baz]].", h)
+	seedTailLintPage(t, d, "Baz", "Body of Baz. Mentions [[Foo]] and [[Bar]].", h)
+
+	var buf bytes.Buffer
+	runTailFastLint(&buf, d, sch)
+	if buf.Len() != 0 {
+		t.Errorf("expected no output when clean, got:\n%s", buf.String())
+	}
+}
+
+// TestRunTailFastLint_FiresWhenOrphans — only orphan signal fires; the
+// `fast lint:` header still renders (greppable surface) along with the
+// orphan line, but no missing-xref or schema-drift lines.
+func TestRunTailFastLint_FiresWhenOrphans(t *testing.T) {
+	d := setupTailLintDB(t)
+	sch := schema.Bundled()
+	h := sch.Hash()
+	seedTailLintPage(t, d, "Foo", "I link to [[Bar]].", h)
+	seedTailLintPage(t, d, "Bar", "I link to [[Foo]].", h)
+	seedTailLintPage(t, d, "Lonely", "Nobody points at me.", h)
+
+	var buf bytes.Buffer
+	runTailFastLint(&buf, d, sch)
+	got := buf.String()
+	if !strings.Contains(got, "fast lint:") {
+		t.Errorf("missing `fast lint:` header in:\n%s", got)
+	}
+	if !strings.Contains(got, `orphans: 1 (Pages: "Lonely")`) {
+		t.Errorf("missing orphan line in:\n%s", got)
+	}
+	if strings.Contains(got, "missing xrefs:") {
+		t.Errorf("missing-xref line should not fire here:\n%s", got)
+	}
+	if strings.Contains(got, "schema drift:") {
+		t.Errorf("schema-drift line should not fire here:\n%s", got)
+	}
+}
+
+// TestRunTailFastLint_FiresWhenMissingXRefs — only missing-xref signal
+// fires; the orphan and schema-drift lines stay quiet. Confirms the
+// arrow-then-titles formatting for the example MissingXRef.
+func TestRunTailFastLint_FiresWhenMissingXRefs(t *testing.T) {
+	d := setupTailLintDB(t)
+	sch := schema.Bundled()
+	h := sch.Hash()
+	// Foo and Bar wikilink each other → no orphans. But Foo's body
+	// mentions "Bar" in bare prose with no [[ ]] wrapper → missing xref.
+	seedTailLintPage(t, d, "Foo", "I link to [[Bar]]. I also discuss Bar in prose.", h)
+	seedTailLintPage(t, d, "Bar", "Linked from [[Foo]].", h)
+
+	var buf bytes.Buffer
+	runTailFastLint(&buf, d, sch)
+	got := buf.String()
+	if !strings.Contains(got, "fast lint:") {
+		t.Errorf("missing `fast lint:` header in:\n%s", got)
+	}
+	if !strings.Contains(got, "missing xrefs:") {
+		t.Errorf("missing-xref line not fired in:\n%s", got)
+	}
+	if !strings.Contains(got, `"Foo" → ["Bar"]`) {
+		t.Errorf("missing-xref example not formatted as expected in:\n%s", got)
+	}
+	if strings.Contains(got, "orphans:") {
+		t.Errorf("orphan line should not fire here:\n%s", got)
+	}
+	if strings.Contains(got, "schema drift:") {
+		t.Errorf("schema-drift line should not fire here:\n%s", got)
+	}
+}
+
+// TestRunTailFastLint_FiresWhenSchemaDrift — only schema-drift fires;
+// the hint message must contain `run \`llmwiki schema migrate\`` (with
+// the literal backticks visible) so the user can copy-paste.
+func TestRunTailFastLint_FiresWhenSchemaDrift(t *testing.T) {
+	d := setupTailLintDB(t)
+	sch := schema.Bundled()
+	h := sch.Hash()
+	// Two pages on the active hash, two on a stale hash. Both pairs
+	// wikilink each other so the orphan signal stays clean.
+	seedTailLintPage(t, d, "Foo", "Body. See also [[Bar]], [[Old1]], [[Old2]].", h)
+	seedTailLintPage(t, d, "Bar", "Body. See [[Foo]], [[Old1]], [[Old2]].", h)
+	seedTailLintPage(t, d, "Old1", "Stale page. See [[Foo]], [[Bar]], [[Old2]].", "deadbeef")
+	seedTailLintPage(t, d, "Old2", "Stale page. See [[Foo]], [[Bar]], [[Old1]].", "deadbeef")
+
+	var buf bytes.Buffer
+	runTailFastLint(&buf, d, sch)
+	got := buf.String()
+	if !strings.Contains(got, "fast lint:") {
+		t.Errorf("missing `fast lint:` header in:\n%s", got)
+	}
+	if !strings.Contains(got, "schema drift: 2 pages on a prior schema") {
+		t.Errorf("schema-drift line missing/mis-formatted in:\n%s", got)
+	}
+	if !strings.Contains(got, "run `llmwiki schema migrate`") {
+		t.Errorf("schema-drift line missing actionable hint with backticks in:\n%s", got)
+	}
+}
+
+// TestRunTailFastLint_FiresWhenMultiple — all three signals fire at
+// once; assert each line renders independently and the header appears
+// exactly once.
+func TestRunTailFastLint_FiresWhenMultiple(t *testing.T) {
+	d := setupTailLintDB(t)
+	sch := schema.Bundled()
+	h := sch.Hash()
+	// Lonely: no inbound (orphan).
+	// Active: links to Lonely; mentions "Old" in bare prose (missing xref).
+	// Old: stale schema (drift); links back to Active so Active isn't an orphan.
+	seedTailLintPage(t, d, "Active", "Body. [[Lonely]] is here. Also Old shows up.", h)
+	seedTailLintPage(t, d, "Lonely", "I am orphaned in the wikilink graph.", h)
+	seedTailLintPage(t, d, "Old", "Stale schema. See [[Active]] and [[Lonely]].", "deadbeef")
+
+	var buf bytes.Buffer
+	runTailFastLint(&buf, d, sch)
+	got := buf.String()
+
+	if strings.Count(got, "fast lint:") != 1 {
+		t.Errorf("`fast lint:` header should appear exactly once; got:\n%s", got)
+	}
+	if !strings.Contains(got, "orphans:") {
+		t.Errorf("orphan line missing in:\n%s", got)
+	}
+	if !strings.Contains(got, "missing xrefs:") {
+		t.Errorf("missing-xref line missing in:\n%s", got)
+	}
+	if !strings.Contains(got, "schema drift:") {
+		t.Errorf("schema-drift line missing in:\n%s", got)
+	}
+	if !strings.Contains(got, "run `llmwiki schema migrate`") {
+		t.Errorf("schema-drift hint missing in:\n%s", got)
+	}
+}
+
+// TestRunTailFastLint_OrphanLineEllipsis — when OrphanCount exceeds
+// FastLintTopN, the rendered Pages list ends with "…" so the user
+// knows the list was capped.
+func TestRunTailFastLint_OrphanLineEllipsis(t *testing.T) {
+	d := setupTailLintDB(t)
+	sch := schema.Bundled()
+	h := sch.Hash()
+	for _, name := range []string{"Apple", "Banana", "Cherry", "Date", "Elderberry"} {
+		seedTailLintPage(t, d, name, "no inbound link", h)
+	}
+	var buf bytes.Buffer
+	runTailFastLint(&buf, d, sch)
+	got := buf.String()
+	if !strings.Contains(got, "orphans: 5") {
+		t.Errorf("orphan count missing in:\n%s", got)
+	}
+	if !strings.Contains(got, "…") {
+		t.Errorf("orphan line should end with `…` when capped; got:\n%s", got)
 	}
 }
 
