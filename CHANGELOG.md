@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `llmwiki init --mcp-only` — skip the provider API-key check at init
+  time. Use this when driving llmwiki via `llmwiki mcp` from Claude
+  Desktop / Claude Code, where the client makes the model calls and
+  llmwiki itself never touches a provider API. Without the flag, init
+  still surfaces the missing-key UserError it always has.
+
+### Changed
+- README rewritten as a 5-minute onboarding doc (~125 lines, was 766).
+  Lead path is the two-command MCP quickstart for Claude Pro/Max users.
+  Deep content extracted into focused files under `docs/`:
+  `docs/mcp.md`, `docs/living-wiki.md`, `docs/schema.md`,
+  `docs/ingestion.md`, `docs/configuration.md`, `docs/architecture.md`,
+  and a new `CONTRIBUTING.md`. No external doc anchors broke (none of
+  the deep README anchors were referenced from CHANGELOG or code).
+- Stripped third-party-pricing claims ("free tier", "no credit card",
+  "generous daily quota") from README and provider docs. Pricing is
+  out of our control; describe what each provider *is* and link to the
+  provider's own pricing page.
+
 ## [0.8.0-rc.1] — 2026-05-05
 
 ### Added

@@ -578,6 +578,76 @@ func TestInit_OutputDoesNotMentionSchemaFile_OnIdempotentRun(t *testing.T) {
 	}
 }
 
+// TestInit_MCPOnly_SkipsKeyCheck — when --mcp-only is set, init must NOT
+// surface a missing-API-key UserError, even for a provider that would
+// normally require one. The MCP user journey is: write config + schema,
+// then drive llmwiki via Claude Desktop / Code where the client makes
+// the model calls and llmwiki itself never touches the provider API.
+func TestInit_MCPOnly_SkipsKeyCheck(t *testing.T) {
+	chdirTemp(t)
+	resetInitSchemaFlags(t)
+	// Explicitly clear the keys so the test outcome doesn't depend on the
+	// developer's shell environment.
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("OPENAI_COMPAT_API_KEY", "")
+	if err := runInitWithFlags(t, map[string]string{
+		"provider": "anthropic",
+		"mcp-only": "true",
+	}); err != nil {
+		t.Fatalf("--mcp-only should skip the key check, got: %v", err)
+	}
+	// Sanity-check: config + schema still landed on disk.
+	if _, err := os.Stat(filepath.Join(".llmwiki", "config.toml")); err != nil {
+		t.Errorf("config.toml not written: %v", err)
+	}
+	if _, err := os.Stat("AGENTS.md"); err != nil {
+		t.Errorf("AGENTS.md not written: %v", err)
+	}
+}
+
+// TestInit_MCPOnly_WithoutFlag_StillErrorsOnMissingKey — regression: the
+// default flow (no --mcp-only) must keep surfacing the missing-key
+// UserError. This is the contract the rest of the test suite relies on.
+func TestInit_MCPOnly_WithoutFlag_StillErrorsOnMissingKey(t *testing.T) {
+	chdirTemp(t)
+	resetInitSchemaFlags(t)
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	err := runInitWithFlags(t, map[string]string{
+		"provider": "anthropic",
+		"mcp-only": "false",
+	})
+	if err == nil {
+		t.Fatal("expected UserError for missing ANTHROPIC_API_KEY without --mcp-only")
+	}
+	var ue *cliutil.UserError
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *cliutil.UserError, got %T: %v", err, err)
+	}
+}
+
+// TestInit_MCPOnly_OutputMentionsClaudeMcpAdd — the MCP-only path is the
+// recommended quickstart for Claude Pro/Max users; init must emit the
+// copy-pasteable `claude mcp add` line so users can keep going without
+// reaching for the README.
+func TestInit_MCPOnly_OutputMentionsClaudeMcpAdd(t *testing.T) {
+	chdirTemp(t)
+	resetInitSchemaFlags(t)
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	out, err := captureInitStdout(t, func() error {
+		return runInitWithFlags(t, map[string]string{
+			"provider": "anthropic",
+			"mcp-only": "true",
+		})
+	})
+	if err != nil {
+		t.Fatalf("--mcp-only init: %v", err)
+	}
+	if !strings.Contains(out, "claude mcp add llmwiki") {
+		t.Errorf("stdout missing `claude mcp add llmwiki` line:\n%s", out)
+	}
+}
+
 // TestInit_SchemaFileFlag_RejectsUnknownValue — only AGENTS.md and
 // CLAUDE.md are valid; anything else is a user error with a message
 // listing the allowed names. We assert against schema.SchemaFilenames

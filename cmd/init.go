@@ -227,6 +227,7 @@ func init() {
 	initCmd.Flags().String("provider", "", "default LLM provider: gemini|anthropic|openai-compatible|ollama (empty = gemini)")
 	initCmd.Flags().Bool("rewrite-schema", false, "Overwrite an existing schema doc with the bundled default. By default `init` leaves an existing AGENTS.md/CLAUDE.md alone.")
 	initCmd.Flags().String("schema-file", "AGENTS.md", "Filename to write the bundled schema to: AGENTS.md (default, multi-vendor) or CLAUDE.md (Claude-Code-only).")
+	initCmd.Flags().Bool("mcp-only", false, "Skip the provider API-key check. Use when you plan to drive llmwiki via 'llmwiki mcp' from Claude Desktop / Claude Code, where the model calls happen in the client and llmwiki itself never calls an LLM API.")
 }
 
 // templateForProvider picks the config template body for a given --provider
@@ -313,6 +314,18 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("Wrote default schema at %s\n", schemaFile)
 		fmt.Println("  (defines page shape and prompts; edit to fit your domain)")
+	}
+
+	// --mcp-only short-circuits the API-key check: when llmwiki is driven via
+	// 'llmwiki mcp' from Claude Desktop / Code, the client makes the model
+	// calls and llmwiki itself never touches a provider API. Surfacing a
+	// missing-key error in that flow would be a paper cut.
+	mcpOnly, _ := cmd.Flags().GetBool("mcp-only")
+	if mcpOnly {
+		fmt.Println("MCP-only mode: skipping provider API-key check.")
+		fmt.Println("  Drive llmwiki from Claude Desktop / Claude Code via:")
+		fmt.Println("    claude mcp add llmwiki --env LLMWIKI_DIR=$PWD -- llmwiki mcp")
+		return nil
 	}
 
 	// Surface a missing-key UserError matching the chosen provider so the very
