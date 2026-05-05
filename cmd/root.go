@@ -29,6 +29,26 @@ type WikiConfig struct {
 
 type AskConfig struct {
 	AutoSave *bool `toml:"auto_save"`
+
+	// Sub-project 8 Phase B — auto-promote keys. Default ON per plan §2.
+	// Pointer pattern matches RespectGitignore / UpdateExisting so an
+	// absent key reads as "use default", a present key as the explicit
+	// value (TOML zero-value `false` would otherwise be ambiguous with
+	// "missing").
+	AutoPromote                *bool    `toml:"auto_promote"`
+	AutoPromoteScoreFloor      int      `toml:"auto_promote_score_floor"`
+	AutoPromoteHedgingPhrases  []string `toml:"auto_promote_hedging_phrases"`
+	AutoPromoteSkipScore       float64  `toml:"auto_promote_skip_score"`
+}
+
+// AutoPromoteOrDefault returns the configured value, defaulting to true
+// when the config left it unset. Plan §2: auto-promote is default-on,
+// gated by the four-signal heuristic + the trust validator.
+func (c AskConfig) AutoPromoteOrDefault() bool {
+	if c.AutoPromote == nil {
+		return true
+	}
+	return *c.AutoPromote
 }
 
 // IngestConfig controls ingest defaults that callers can override via flags.
@@ -248,6 +268,7 @@ func loadSchemaSoftWithDB() error {
 		cfg.LLM.OllamaURL = cfg.Providers.Ollama.URL
 	}
 	applyIngestDefaults(&cfg.Ingest)
+	applyAskDefaults(&cfg.Ask)
 	var err error
 	database, err = db.Open(cfg.Wiki.DBPath)
 	if err != nil {
@@ -326,6 +347,7 @@ func loadConfig() error {
 		cfg.LLM.OllamaURL = cfg.Providers.Ollama.URL
 	}
 	applyIngestDefaults(&cfg.Ingest)
+	applyAskDefaults(&cfg.Ask)
 	// Load the user-editable schema doc from the wiki root, falling
 	// back to schema.Bundled() when neither AGENTS.md nor CLAUDE.md is
 	// present (a v0.6 wiki opening under v0.7). Validate immediately —
@@ -495,6 +517,38 @@ func applyIngestDefaults(c *IngestConfig) {
 	}
 	if c.UpdateExistingQuoteFloor == 0 {
 		c.UpdateExistingQuoteFloor = 2
+	}
+}
+
+// applyAskDefaults fills zero-valued AskConfig fields with their
+// sub-project 8 Phase B defaults. Pre-v0.8 configs without an [ask]
+// auto_promote_* block decode into zero / nil; we silently apply the
+// defaults the v0.8 init template would have written.
+//
+// Default polarity:
+//   - AutoPromote: nil → true (plan §2: auto-promote is default-on, gated
+//     by the four-signal heuristic + the trust validator).
+//   - AutoPromoteSkipScore: 1e-6 (NOT plan §2's nominal 5.0). Phase A
+//     discovered SQLite's bm25() returns very small magnitudes (1e-5 ..
+//     1e-6 on small wikis); 5.0 is unreachable in practice, so we hard-
+//     code 1e-6 as the default that lets signal 4 actually fire. The
+//     [ask] auto_promote_skip_score key remains the user-tunable seam.
+//   - AutoPromoteScoreFloor: 0 (reserved; Phase A's gate doesn't read it,
+//     but we plumb the key so Phase C/D additions don't churn cfg).
+//   - AutoPromoteHedgingPhrases: nil → empty; EvaluateAutoPromote
+//     re-defaults to wiki.DefaultAutoPromoteConfig().HedgingPhrases when
+//     the slice is empty, so we leave it at len 0 here rather than
+//     duplicating the canonical six phrases on the cmd side.
+func applyAskDefaults(c *AskConfig) {
+	if c.AutoPromote == nil {
+		t := true
+		c.AutoPromote = &t
+	}
+	if c.AutoPromoteSkipScore == 0 {
+		// SQLite-realistic: bm25() magnitudes on a small wiki land in the
+		// 1e-5..1e-6 range, far below the plan's nominal 5.0. See
+		// internal/wiki/autopromote.go header for the contract.
+		c.AutoPromoteSkipScore = 1e-6
 	}
 }
 
