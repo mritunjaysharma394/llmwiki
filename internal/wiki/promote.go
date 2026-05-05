@@ -65,6 +65,15 @@ type PromoteOptions struct {
 	// (ValidateAndAttachEvidence) and the post-rewrite verbatim-quote
 	// re-check run regardless of schema content.
 	Schema schema.Schema
+
+	// Source tags the promote-trigger origin in log.md so cron / MCP /
+	// session-capture entries can be distinguished from manual ones.
+	// Sub-project 8 Phase B introduces "auto" (gate-passed answer in
+	// `ask`); Phase E will add "session" (Stop-hook capture). The
+	// historical `llmwiki promote` CLI surface and back-compat callers
+	// that leave Source="" render as "manual". Values: "auto" |
+	// "manual" | "session".
+	Source string
 }
 
 // PromoteResult is the structured success / failure shape PromoteAnswer
@@ -389,10 +398,21 @@ func PromoteAnswer(ctx context.Context, cfg IngestSourceConfig, database *db.DB,
 		fmt.Fprintf(os.Stderr, "  WARN reading pages for index after promote: %v\n", err)
 	}
 	if !opts.NoSave {
+		// Sub-project 8 Phase B: the optional Source tag differentiates
+		// auto-promote (sub-project 8 §2 quality gate) and Phase E's
+		// session-capture from a hand-typed `llmwiki promote`. An empty
+		// Source maps to "manual" so pre-Phase-B callers don't drift the
+		// log shape. Format is "<src=tag> <title> → N evidence" — the
+		// tag prefix keeps grep-ability and downstream sweepers (Phase
+		// D's --promote-pending) can filter on `src=auto`.
+		source := opts.Source
+		if source == "" {
+			source = "manual"
+		}
 		_ = AppendLog(cfg.WikiDir, LogEntry{
 			At:      time.Now().UTC(),
 			Kind:    "promote",
-			Payload: fmt.Sprintf("%s → %d evidence", page.Title, evidenceCount),
+			Payload: fmt.Sprintf("src=%s %s → %d evidence", source, page.Title, evidenceCount),
 		})
 	}
 
