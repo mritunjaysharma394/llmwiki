@@ -1,12 +1,8 @@
 package cmd
 
 import (
-	"crypto/sha256"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
-	"strings"
 
 	"github.com/mritunjaysharma394/llmwiki/internal/cliutil"
 	"github.com/mritunjaysharma394/llmwiki/internal/wiki"
@@ -116,25 +112,9 @@ func runLint(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func currentHash(uri string) (string, error) {
-	var data []byte
-	var err error
-	switch {
-	case strings.HasPrefix(uri, "http://") || strings.HasPrefix(uri, "https://"):
-		resp, err := http.Get(uri)
-		if err != nil {
-			return "", err
-		}
-		defer resp.Body.Close()
-		data, err = io.ReadAll(resp.Body)
-		if err != nil {
-			return "", err
-		}
-	default:
-		data, err = os.ReadFile(uri)
-		if err != nil {
-			return "", err
-		}
-	}
-	return fmt.Sprintf("%x", sha256.Sum256(data)), nil
-}
+// currentHash is a thin wrapper around wiki.CurrentSourceHash kept here
+// so the original call site in runLint stays readable. Sub-project 8
+// Phase D extracted the implementation into internal/wiki/sources.go
+// so the lint pass and the new RunMaintenance umbrella share one
+// byte-equal staleness check.
+func currentHash(uri string) (string, error) { return wiki.CurrentSourceHash(uri) }
