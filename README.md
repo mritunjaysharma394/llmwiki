@@ -6,8 +6,8 @@ source quotes. Trust comes from validation: every page that ships includes
 evidence quotes that are byte-exact substrings of the original source —
 hallucinated pages are dropped before they hit disk.
 
-![llmwiki demo](docs/assets/demo.png)
-<!-- TODO: regenerate via tools/record-demo.sh -->
+![llmwiki demo](docs/assets/demo.gif)
+<!-- TODO(release): asset missing — record via tools/record-demo.sh (requires vhs or asciinema). -->
 
 ## Install
 
@@ -51,6 +51,11 @@ llmwiki ask "what does the gotypes example do?"
 
 Run `llmwiki status` at any time to see what's been ingested.
 
+Want llmwiki to keep updating itself? Skip the one-shot `ingest` and
+point `llmwiki watch` at a folder — drop a file in, see a page land
+in seconds. See the [Always-on](#always-on) section below for the
+daemon recipe and the cron / Claude-Code-Stop-hook companions.
+
 Already on Anthropic? Pass `--provider anthropic` (or drive llmwiki via your
 Claude subscription with no API spend at all — see the MCP section below):
 
@@ -64,6 +69,37 @@ To run fully offline against a local model:
 ```bash
 llmwiki init --provider ollama       # writes a config that points at Ollama
 ```
+
+## Always-on
+
+v0.8 turns llmwiki from a CLI tool into a living wiki. Three
+companion commands compose the always-on surface:
+
+- `llmwiki watch <dir>` — fsnotify daemon. Drop a file in the
+  watched directory; debounce 2s; ingest into the wiki via a
+  SQLite-backed crash-resumable queue. Retries 3 times with
+  5s/30s/5min backoff before marking a row failed; Ctrl-C drains
+  the in-flight ingest gracefully.
+- `llmwiki maintain` — umbrella subcommand for cron / launchd /
+  GitHub Actions. Bare invocation runs `--lint`,
+  `--refresh-stale`, `--promote-pending`; pass any flag to scope
+  the run; `--dry-run` composes with all of the above. Exits
+  non-zero only on real failures (network, DB, crashed promote)
+  so cron doesn't page on cosmetic drift.
+- `llmwiki capture-session` — Claude Code Stop-hook companion.
+  Pipe the session JSON into `llmwiki capture-session` and any
+  wiki-touching turns are filed back as a saved answer; the
+  auto-promote gate decides whether they become a permanent page.
+
+Plus auto-promote in `llmwiki ask` itself: every ask runs a
+four-signal heuristic gate (cited pages, evidence quotes, length,
+no-hedging, no-near-duplicate) and on pass files the answer as a
+permanent page automatically. Default ON; opt out with `[ask]
+auto_promote = false`.
+
+The full launchd / systemd / GitHub Actions cron recipes, the
+`watch` examples, and the 5-line Claude Code Stop-hook recipe are
+in **[`docs/automation.md`](docs/automation.md)**.
 
 ## Providers
 
@@ -307,9 +343,10 @@ preserve the validator: every page reaching disk has at least one evidence
 quote that substring-matches its source — `promote` defensively re-validates
 because source files may have changed since the ask.
 
-v0.6's `--update-existing` flag is the most validator-hostile feature in
-the binary; it preserves the trust property by keeping the prior page
-version whenever the validator drops the proposed body.
+v0.6's `--update-existing` (now default-on as of v0.8) is the most
+validator-hostile feature in the binary; it preserves the trust
+property by keeping the prior page version whenever the validator
+drops the proposed body.
 
 v0.7's user-editable schema (`AGENTS.md` or `CLAUDE.md` at the wiki root)
 controls what the LLM is *asked* and how pages are *shaped* — it cannot
@@ -400,13 +437,19 @@ Body-only, idempotent, no LLM call. Evidence rows are untouched. Open
 `.llmwiki/wiki/` in Obsidian and the graph view lights up the new
 connections immediately.
 
-### Cross-page updates (opt-in)
+### Cross-page updates (default-on as of v0.8)
 
-v0.6 adds a default-off `--update-existing` flag that, when enabled, edits
-existing pages in light of a new source — folding the new source's claims
-into the pages whose claims it refines, qualifies, contradicts, or extends.
-**Off by default** because it is the most validator-hostile operation in
-the binary.
+v0.6 introduced the `--update-existing` flag; v0.8 flipped its default
+to **on**, matching Karpathy's "modify 10–15 relevant pages in one
+pass" framing in the original LLM-wiki gist. When enabled, ingest
+edits existing pages in light of the new source — folding the new
+source's claims into the pages whose claims it refines, qualifies,
+contradicts, or extends. The validator drops any proposed body that
+fails byte-exact substring-match, so flipping the default doesn't
+weaken the trust property — only the daily-use posture. Opt out
+persistently with `[ingest] update_existing = false` in
+`.llmwiki/config.toml`, or for a single ingest with
+`llmwiki ingest <source> --update-existing=false`.
 
 ```text
 llmwiki ingest ./CHANGELOG-1.2.md --update-existing
@@ -471,10 +514,12 @@ block of `.llmwiki/config.toml`. Tune the candidate caps via
 `update_existing_max_candidates_total` (default 50), and
 `update_existing_quote_floor` (default 2).
 
-We're starting v0.6 with `--update-existing` default-off. Once we have
-real-world numbers from opt-in users, we may flip the default in v0.7 —
-track [Q11 in the spec](docs/superpowers/specs/2026-05-04-living-wiki-dynamics-design.md)
-for the discussion.
+v0.6 shipped this default-off; v0.8 flipped the default to true.
+The Karpathy gist describes "modify 10–15 relevant pages in a single
+pass" as the *default* shape ingest takes; the recommended provider
+(Gemini Flash) is free, and the validator catches bad updates either
+way. Anthropic-on-credit-card users who want the v0.6 posture write
+one config line: `[ingest] update_existing = false`.
 
 ## Customising your wiki (AGENTS.md or CLAUDE.md)
 

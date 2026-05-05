@@ -46,7 +46,7 @@ type Deps struct {
 
 const (
 	serverName    = "llmwiki"
-	serverVersion = "0.7.0-rc.1" // bumped from "0.6.0-rc.1" for sub-project 7 (user-editable schema)
+	serverVersion = "0.8.0-rc.1" // bumped from "0.7.0-rc.1" for sub-project 8 (automation: watch, maintain, auto-promote, capture-session)
 )
 
 // NewServer registers all eight tools — five read-only (list_pages,

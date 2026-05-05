@@ -7,6 +7,134 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0-rc.1] — 2026-05-05
+
+### Added
+- `llmwiki watch <dir>` — long-lived fsnotify daemon. Drop a file
+  in a watched directory; debounce 2s per file (so editor saves
+  coalesce); enqueue onto a SQLite-backed crash-resumable queue;
+  consumer goroutine drains the queue via the same pipeline
+  `llmwiki ingest <source>` uses. Ctrl-C drains the in-flight
+  ingest, closes fsnotify, exits 0. Retry policy: 3 attempts with
+  5s / 30s / 5min exponential backoff, then `status='failed'`.
+  `[watch]` config block exposes `dirs`, `debounce_seconds`, and
+  `max_attempts`. The watcher is the single feature that converts
+  llmwiki from "CLI tool" to "living wiki" as a UX shift —
+  Karpathy's "modify 10–15 pages in one pass" applied to a folder
+  of dropped files instead of a one-off command.
+- `llmwiki maintain` — umbrella subcommand for cron / launchd /
+  GitHub Actions automation. Bare invocation runs `--lint`,
+  `--refresh-stale`, `--promote-pending`; pass any flag to run only
+  that subset. `--dry-run` composes with all of the above.
+  Composable, idempotent, exits non-zero only when an actual
+  failure happens (network, DB, crashed promote) — cosmetic
+  findings exit 0 so cron doesn't page on a merely drifty wiki.
+- `llmwiki capture-session` — Claude Code Stop-hook companion.
+  Reads the session JSON from stdin, extracts assistant turns
+  that mention `LLMWIKI_DIR` or invoke `llmwiki ` on the CLI,
+  files them as a saved answer, and runs the auto-promote gate.
+  Robustness contract: empty stdin / malformed JSON / no
+  wiki-relevant turns all exit 0 silently — capture must never
+  fail the user's Stop hook. Recipe in `docs/automation.md` is
+  copy-paste only; we don't auto-install hooks.
+- Auto-promote in `llmwiki ask` — every ask runs the four-signal
+  heuristic gate; on pass, the saved answer is promoted to a
+  permanent page (subject to the byte-exact validator). Output is
+  one line: `→ filed as [[Title]]` or `→ saved to <path>
+  (<reason>)`. The four signals: ≥ 2 cited pages + ≥ 3 evidence
+  quotes, length 100–3000 words, no hedging phrases, no
+  near-duplicate page. Default ON; opt out with `[ask]
+  auto_promote = false`. The validator drops anything the gate
+  somehow lets through; gate-fail or validator-fail leaves the
+  answer in `.llmwiki/answers/` for manual review (two locks,
+  never silently dropped).
+- Ingest-tail FastLint — after every ingest, sub-second pass over
+  the just-written wiki surfaces orphan pages, missing
+  cross-references, and schema drift counts. Silent when clean.
+  The slow checks (URL re-fetch staleness, full-wiki LLM
+  contradiction batch) stay in `llmwiki maintain` from cron.
+- `internal/queue` — SQLite-backed work queue
+  (`Enqueue / NextPending / MarkSuccess / MarkRetrying / MarkFailed`).
+  Crash-resumable: a watch restart picks up `pending` and
+  window-elapsed `retrying` rows; `running` rows from a crashed
+  predecessor are recovered after a stale window. Lives in the
+  same `wiki.db` (one DB → one truth).
+- DB v6 — `ingest_queue` table (`id, source_uri, status,
+  attempts, last_error, enqueued_at, updated_at, next_attempt_at`).
+  Additive migration; v0.7 wikis upgrade transparently on first
+  v0.8 connection.
+- `tools/record-demo.sh` — re-record `docs/assets/demo.gif`. Uses
+  vhs (preferred) or asciinema-agg (fallback). Drives the v0.8
+  demo: fresh init → drop a file → watcher produces a page → ask
+  auto-promotes → contradiction surfaces.
+
+### Changed
+- `[ingest] update_existing` defaults to **true**. The Karpathy
+  gist describes "modify 10–15 relevant pages in a single pass"
+  as the *default* shape ingest takes, not an opt-in. v0.6
+  shipped this default-off because we were nervous about LLM
+  cost; the recommended provider (Gemini Flash) is free, and on
+  Anthropic Haiku ~$0.30/ingest with caching is fine for the
+  target user. The validator still drops bad updates — flipping
+  the default doesn't change the trust property, only the
+  daily-use posture. Anthropic-on-credit-card users opt out via
+  `[ingest] update_existing = false` (one config line).
+- `internal/mcp` `serverVersion` bumped to `0.8.0-rc.1`.
+- `PromoteAnswer` gains `PromoteOptions.Source` (`"auto" |
+  "manual" | "session"`). `log.md` `**promote**` entries now
+  carry a `src=` prefix so cron / MCP / session-capture promotes
+  can be distinguished from manual ones at audit time.
+- `cmd/init` config templates (gemini / anthropic / ollama /
+  openai-compatible) gain `[watch]` and the `update_existing =
+  true` line. Existing wikis without the new keys keep working —
+  defaults are filled silently the same way `[ingest]` defaults
+  have always been.
+
+### Notes
+- **Trust property reaffirmed.** Every page written via
+  auto-promote, watch-mode ingest, or session-capture passes
+  through `wiki.ValidateAndAttachEvidence`. No new write path
+  bypasses the byte-exact substring validator. Auto-promote
+  requires *both* the heuristic gate AND the validator: two
+  locks; either failure leaves the answer in
+  `.llmwiki/answers/` (never silently dropped, never written
+  downgraded). The schema is not auto-edited; `AGENTS.md` is
+  touched only by `init` and the user's editor.
+- **DB v6 migration is additive only.** New `ingest_queue`
+  table; `pages`, `evidence`, `sources`, `source_files`,
+  `chunks`, `page_update_log`, `saved_answers` are byte-identical
+  pre/post v6. Roll-forward only — no down-migration script.
+- **URL/feed polling in watch mode is deferred to v0.9.x.** v0.8
+  watch is local-fsnotify only; URL polling needs a separate
+  goroutine, separate failure mode, and separate config knob set
+  that we want to design after seeing how local-only feels.
+- **No LLM-judged auto-promote scoring.** kytmanov-style "have
+  the LLM grade itself" is unreliable and adds an LLM call per
+  ask; the four mechanical signals (cites, evidence, length,
+  hedging, BM25 dedup) are good enough.
+- **Cursor / Codex session-capture variants deferred.** Claude
+  Code is the primary integration today (we already have an MCP
+  server for it); other-IDE Stop-hook adapters bolt on if/when
+  users ask.
+
+### Known issues / TODO
+- `docs/assets/demo.gif` was not recorded in this release —
+  neither vhs nor asciinema is installed on the release machine.
+  Re-record via `tools/record-demo.sh` and replace the
+  placeholder image link in `README.md`. Tracked as
+  `TODO(release):` at the top of `docs/automation.md`.
+
+### Inspiration
+Builds on Karpathy's "modify 10–15 pages in one pass" default
+and "good answers get filed back as new pages" line from the
+[LLM-wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f);
+the persistent retry queue with crash recovery borrows
+[nashsu/llm_wiki](https://github.com/nashsu/llm_wiki)'s shape;
+the auto-promote posture mirrors
+[kytmanov/obsidian-llm-wiki-local](https://github.com/kytmanov/obsidian-llm-wiki-local)'s
+`--auto-approve` daemon (we go further because we have a
+validator they don't).
+
 ## [0.7.0-rc.1] — 2026-05-04
 
 ### Added

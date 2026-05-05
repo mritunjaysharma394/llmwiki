@@ -990,8 +990,8 @@ func TestPromoteAnswer_ToolRegistered(t *testing.T) {
 		sort.Strings(got)
 		t.Fatalf("promote_answer not registered; tools=%v", got)
 	}
-	if serverVersion != "0.7.0-rc.1" {
-		t.Errorf("serverVersion = %q, want %q", serverVersion, "0.7.0-rc.1")
+	if serverVersion != "0.8.0-rc.1" {
+		t.Errorf("serverVersion = %q, want %q", serverVersion, "0.8.0-rc.1")
 	}
 }
 
@@ -1116,13 +1116,13 @@ func TestPromoteAnswer_StaleEvidence(t *testing.T) {
 // target title; the handler should return a structured title_exists.
 // ----- Phase E (sub-project 6b) — mcp.ingest update_existing wiring -----
 
-// TestServerVersionIs070 pins the serverVersion constant to the v0.7
-// release line. Sub-project 7 / Phase I Task 14 bumps from
-// "0.6.0-rc.1" to "0.7.0-rc.1"; this guard rail catches accidental
-// rollback of the version string.
-func TestServerVersionIs070(t *testing.T) {
-	if serverVersion != "0.7.0-rc.1" {
-		t.Errorf("serverVersion = %q, want %q", serverVersion, "0.7.0-rc.1")
+// TestServerVersionIs080 pins the serverVersion constant to the v0.8
+// release line. Sub-project 8 Phase E bumps from "0.7.0-rc.1" to
+// "0.8.0-rc.1"; this guard rail catches accidental rollback of the
+// version string.
+func TestServerVersionIs080(t *testing.T) {
+	if serverVersion != "0.8.0-rc.1" {
+		t.Errorf("serverVersion = %q, want %q", serverVersion, "0.8.0-rc.1")
 	}
 }
 
