@@ -541,14 +541,18 @@ func resetUpdateExistingFlags(t *testing.T) {
 	t.Cleanup(clear)
 }
 
-// TestIngest_UpdateExistingFlagDefaultsOff: with no --update-existing
-// flag and no [ingest] update_existing config key, the IngestOptions
-// reaching wiki.IngestSource must have UpdateExisting == false (Q11).
-func TestIngest_UpdateExistingFlagDefaultsOff(t *testing.T) {
+// TestIngest_UpdateExistingFlagDefaultsOn: with no --update-existing
+// flag and no Config (the "fresh CLI invocation, no config file at
+// all" path), the IngestOptions reaching wiki.IngestSource must have
+// UpdateExisting == true. Sub-project 8 Phase C (plan §"Six design
+// calls #1") flipped the v0.6 default-off polarity. The
+// `--update-existing=false` flag and `[ingest] update_existing =
+// false` config key both remain as explicit-opt-out seams.
+func TestIngest_UpdateExistingFlagDefaultsOn(t *testing.T) {
 	resetUpdateExistingFlags(t)
 	opts := buildWikiIngestOptions(ingestCmd, nil)
-	if opts.UpdateExisting {
-		t.Errorf("UpdateExisting = true with no flag/config; want false")
+	if !opts.UpdateExisting {
+		t.Errorf("UpdateExisting = false with no flag/config; want true (Phase C flip)")
 	}
 }
 

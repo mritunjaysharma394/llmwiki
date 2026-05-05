@@ -209,6 +209,40 @@ func TestInit_OllamaTemplate(t *testing.T) {
 	}
 }
 
+// TestInit_AllTemplatesEnableUpdateExistingByDefault verifies every
+// generated config.toml — across all four provider templates — carries
+// an explicit `update_existing = true` line in [ingest]. Sub-project 8
+// Phase C (plan §"Six design calls #1") flipped the v0.6 default-off
+// polarity; new wikis ship with the cross-page page-update pass on so
+// the gist's described "modify 10–15 pages in one pass" shape is the
+// out-of-the-box experience. The accompanying `# v0.8:` comment
+// explains *why* in-line so users can see the rationale without
+// reaching for the docs.
+func TestInit_AllTemplatesEnableUpdateExistingByDefault(t *testing.T) {
+	for _, provider := range []string{"", "anthropic", "ollama", "openai-compatible"} {
+		t.Run("provider="+provider, func(t *testing.T) {
+			chdirTemp(t)
+			if err := runInitWithProvider(t, provider); err != nil {
+				var ue *cliutil.UserError
+				if !errors.As(err, &ue) {
+					t.Fatalf("runInit: %v", err)
+				}
+			}
+			body, err := os.ReadFile(filepath.Join(".llmwiki", "config.toml"))
+			if err != nil {
+				t.Fatalf("reading config: %v", err)
+			}
+			s := string(body)
+			if !strings.Contains(s, "update_existing = true") {
+				t.Errorf("template (provider=%q) missing `update_existing = true`:\n%s", provider, s)
+			}
+			if !strings.Contains(s, "# v0.8:") {
+				t.Errorf("template (provider=%q) missing `# v0.8:` rationale comment:\n%s", provider, s)
+			}
+		})
+	}
+}
+
 // writeMinimalConfig drops a config.toml at .llmwiki/config.toml and creates
 // the wiki/raw/answers subdirs that loadConfig + db.Open expect.
 func writeMinimalConfig(t *testing.T, body string) {

@@ -393,6 +393,12 @@ func buildWikiIngestOptions(cmd *cobra.Command, c *Config) wiki.IngestOptions {
 // resolveUpdateExisting layers package default → [ingest] config → CLI
 // flag, CLI wins when explicitly set. Mirrors the RespectGitignore *bool
 // "absent vs explicit" disambiguation pattern.
+//
+// Sub-project 8 Phase C flipped the package-default polarity to true
+// (plan §"Six design calls #1"). The c == nil branch — only hit by a
+// handful of unit tests that pass a nil Config — now matches that
+// flipped default so the CLI's "no config file at all" path behaves
+// the same as the "config file with no [ingest] block" path.
 func resolveUpdateExisting(cmd *cobra.Command, c *Config) bool {
 	if cmd.Flags().Changed("update-existing") {
 		v, _ := cmd.Flags().GetBool("update-existing")
@@ -401,7 +407,7 @@ func resolveUpdateExisting(cmd *cobra.Command, c *Config) bool {
 	if c != nil {
 		return c.Ingest.UpdateExistingOrDefault()
 	}
-	return false
+	return true
 }
 
 // distinctSourceFiles returns the distinct, first-occurrence-ordered list of

@@ -134,13 +134,25 @@ func (c IngestConfig) RespectGitignoreOrDefault() bool {
 	return *c.RespectGitignore
 }
 
-// UpdateExistingOrDefault returns the configured value, defaulting to false
-// when the config left it unset. Mirrors RespectGitignoreOrDefault but
-// flips the default polarity: the cross-page page-update pass is opt-in
-// (Q11), so an absent [ingest] update_existing key reads as off.
+// UpdateExistingOrDefault returns the configured value, defaulting to
+// true when the config left it unset. Sub-project 8 Phase C (plan
+// §"Six design calls #1") flipped the v0.6 default-off polarity:
+//
+//   - The Karpathy gist describes "modify 10–15 relevant pages in a
+//     single pass" as the *default* shape ingest takes, not an opt-in.
+//   - The recommended provider (Gemini Flash) is free, and on Anthropic
+//     Haiku the marginal cost (~$0.30/ingest with caching) is fine for
+//     the target user. v0.6's nervous default-off no longer matches the
+//     daily-use posture v0.8 ships.
+//   - The trust property is unchanged: the validator still drops bad
+//     update proposals, so flipping the default doesn't loosen the
+//     byte-exact substring guarantee — only the daily-use posture.
+//   - Anthropic-on-credit-card users who want to opt out write one
+//     config line: `[ingest] update_existing = false`. The
+//     `--update-existing` CLI flag stays as the explicit-override seam.
 func (c IngestConfig) UpdateExistingOrDefault() bool {
 	if c.UpdateExisting == nil {
-		return false
+		return true
 	}
 	return *c.UpdateExisting
 }
@@ -501,13 +513,18 @@ func applyIngestDefaults(c *IngestConfig) {
 	if c.SitemapMaxPages == 0 {
 		c.SitemapMaxPages = 200
 	}
-	// Sub-project 6b — pillar 3 — cross-page page-update pass (v0.6).
-	// UpdateExisting defaults off (Q11). The three tunables — per-
-	// source and global candidate caps (Q5) and the quote floor (Q7) —
-	// pick up 20 / 50 / 2 when the config left them at zero.
+	// Sub-project 6b — pillar 3 — cross-page page-update pass.
+	// v0.6 shipped this default-off (Q11); sub-project 8 Phase C
+	// (plan §"Six design calls #1") flipped the polarity to default-on.
+	// See UpdateExistingOrDefault's comment for the full rationale —
+	// in short: Karpathy's "modify 10–15 pages in one pass" is the
+	// described *default* shape, the validator still drops bad updates,
+	// and recommended providers are cheap or free. The three tunables
+	// — per-source and global candidate caps (Q5) and the quote floor
+	// (Q7) — pick up 20 / 50 / 2 when the config left them at zero.
 	if c.UpdateExisting == nil {
-		f := false
-		c.UpdateExisting = &f
+		t := true
+		c.UpdateExisting = &t
 	}
 	if c.UpdateExistingMaxCandidatesPerSource == 0 {
 		c.UpdateExistingMaxCandidatesPerSource = 20

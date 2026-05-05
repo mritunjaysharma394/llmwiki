@@ -36,6 +36,10 @@ pdf_min_text_per_page = 50
 extra_text_extensions = []
 extra_skip_globs = []
 respect_gitignore = true
+# v0.8: cross-page page-update pass is on by default (Karpathy's "modify
+# 10-15 relevant pages in one pass" shape). Validator still drops bad
+# proposals; set to false to disable per-ingest cross-page updates.
+update_existing = true
 feed_request_per_second = 1.0
 feed_max_entries = 50
 sitemap_max_pages = 200
@@ -84,6 +88,10 @@ pdf_min_text_per_page = 50
 extra_text_extensions = []
 extra_skip_globs = []
 respect_gitignore = true
+# v0.8: cross-page page-update pass is on by default (Karpathy's "modify
+# 10-15 relevant pages in one pass" shape). Validator still drops bad
+# proposals; set to false to disable per-ingest cross-page updates.
+update_existing = true
 feed_request_per_second = 1.0
 feed_max_entries = 50
 sitemap_max_pages = 200
@@ -111,6 +119,10 @@ pdf_min_text_per_page = 50
 extra_text_extensions = []
 extra_skip_globs = []
 respect_gitignore = true
+# v0.8: cross-page page-update pass is on by default (Karpathy's "modify
+# 10-15 relevant pages in one pass" shape). Validator still drops bad
+# proposals; set to false to disable per-ingest cross-page updates.
+update_existing = true
 feed_request_per_second = 1.0
 feed_max_entries = 50
 sitemap_max_pages = 200
@@ -141,6 +153,10 @@ pdf_min_text_per_page = 50
 extra_text_extensions = []
 extra_skip_globs = []
 respect_gitignore = true
+# v0.8: cross-page page-update pass is on by default (Karpathy's "modify
+# 10-15 relevant pages in one pass" shape). Validator still drops bad
+# proposals; set to false to disable per-ingest cross-page updates.
+update_existing = true
 feed_request_per_second = 1.0
 feed_max_entries = 50
 sitemap_max_pages = 200

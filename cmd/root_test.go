@@ -193,26 +193,34 @@ respect_gitignore = false
 // values terse and avoids local variable noise inside each test.
 func ptrBool(b bool) *bool { return &b }
 
-// TestApplyIngestDefaults_UpdateExistingDefaultsFalse verifies that an
-// IngestConfig with UpdateExisting nil — the shape pre-v0.6 configs decode
-// into when [ingest] update_existing is absent — defaults to false. Q11 in
-// the sub-project 6b plan locks this contract: default-off, opt-in only.
-func TestApplyIngestDefaults_UpdateExistingDefaultsFalse(t *testing.T) {
+// TestApplyIngestDefaults_UpdateExistingDefaultsTrue verifies that an
+// IngestConfig with UpdateExisting nil — the shape pre-v0.8 configs
+// decode into when [ingest] update_existing is absent — defaults to
+// true. Sub-project 8 Phase C (plan §"Six design calls #1") flipped
+// the v0.6 default-off polarity: Karpathy's "modify 10–15 pages in
+// one pass" is the gist's *default* shape, the validator still drops
+// bad proposals, and recommended providers are cheap or free. Users
+// opt out by writing `[ingest] update_existing = false`.
+func TestApplyIngestDefaults_UpdateExistingDefaultsTrue(t *testing.T) {
 	var c IngestConfig
 	applyIngestDefaults(&c)
 	if c.UpdateExisting == nil {
-		t.Fatal("UpdateExisting nil after applyIngestDefaults; expected non-nil pointer to false")
+		t.Fatal("UpdateExisting nil after applyIngestDefaults; expected non-nil pointer to true")
 	}
-	if *c.UpdateExisting {
-		t.Errorf("UpdateExisting default = true, want false (Q11)")
+	if !*c.UpdateExisting {
+		t.Errorf("UpdateExisting default = false, want true (Phase C flip)")
 	}
-	if c.UpdateExistingOrDefault() {
-		t.Error("UpdateExistingOrDefault default should be false")
+	if !c.UpdateExistingOrDefault() {
+		t.Error("UpdateExistingOrDefault default should be true")
 	}
 }
 
 // TestApplyIngestDefaults_UpdateExistingHonoursExplicitTrue makes sure
-// applyIngestDefaults doesn't clobber an explicit true.
+// applyIngestDefaults doesn't clobber an explicit true. Post-Phase-C
+// this matches the new default polarity, but the contract is
+// "explicit pointers always survive" regardless of which way the
+// default points — so the test still earns its keep as a regression
+// guard against any future refactor that drops the nil-check.
 func TestApplyIngestDefaults_UpdateExistingHonoursExplicitTrue(t *testing.T) {
 	c := IngestConfig{UpdateExisting: ptrBool(true)}
 	applyIngestDefaults(&c)
@@ -221,10 +229,11 @@ func TestApplyIngestDefaults_UpdateExistingHonoursExplicitTrue(t *testing.T) {
 	}
 }
 
-// TestApplyIngestDefaults_UpdateExistingHonoursExplicitFalse confirms that
-// an explicitly-false pointer (the "user opted out, even though default is
-// also off" case) survives applyIngestDefaults intact. Mirrors the
-// RespectGitignore *bool disambiguation pattern.
+// TestApplyIngestDefaults_UpdateExistingHonoursExplicitFalse confirms
+// that an explicitly-false pointer survives applyIngestDefaults
+// intact. Post-Phase-C this is the user's "opt out of the new default
+// behaviour" path — the test guards that the *bool disambiguation
+// (nil vs explicit) still works after the polarity flip.
 func TestApplyIngestDefaults_UpdateExistingHonoursExplicitFalse(t *testing.T) {
 	c := IngestConfig{UpdateExisting: ptrBool(false)}
 	applyIngestDefaults(&c)
