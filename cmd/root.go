@@ -123,6 +123,10 @@ type Config struct {
 	Ask       AskConfig       `toml:"ask"`
 	Ingest    IngestConfig    `toml:"ingest"`
 	Providers ProvidersConfig `toml:"providers"`
+	// Watch surfaces sub-project 8 Phase E's `llmwiki watch` daemon
+	// knobs. Empty default; user opts in by passing <dir> or by setting
+	// `dirs` under [watch] in .llmwiki/config.toml. See cmd/watch.go.
+	Watch WatchConfig `toml:"watch"`
 }
 
 // RespectGitignoreOrDefault returns the configured value, defaulting to true
@@ -584,6 +588,7 @@ func init() {
 	rootCmd.AddCommand(promoteCmd)
 	rootCmd.AddCommand(lintCmd)
 	rootCmd.AddCommand(maintainCmd)
+	rootCmd.AddCommand(watchCmd)
 	rootCmd.AddCommand(mcpCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(versionCmd)

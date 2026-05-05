@@ -8,6 +8,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.37.0
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/fatih/color v1.19.0
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/go-shiori/go-readability v0.0.0-20251205110129-5db1dc9836f0
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/mark3labs/mcp-go v0.50.0

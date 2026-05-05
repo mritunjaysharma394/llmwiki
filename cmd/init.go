@@ -44,6 +44,17 @@ feed_request_per_second = 1.0
 feed_max_entries = 50
 sitemap_max_pages = 200
 
+[watch]
+# v0.8: 'llmwiki watch <dir>' runs as a long-lived daemon, fsnotifying
+# the listed directories and ingesting new/changed files via a SQLite-
+# backed crash-resumable queue. Empty 'dirs' means "no auto-watch on
+# bare invocation"; pass <dir> as an arg or fill this list to opt in.
+# Debounce coalesces rapid writes (editors saving in chunks); max_attempts
+# caps retries with 5s/30s/5min exponential backoff before status='failed'.
+dirs = []
+debounce_seconds = 2
+max_attempts = 3
+
 [providers.gemini]
 default_model = "gemini-2.5-flash"
 
@@ -95,6 +106,17 @@ update_existing = true
 feed_request_per_second = 1.0
 feed_max_entries = 50
 sitemap_max_pages = 200
+
+[watch]
+# v0.8: 'llmwiki watch <dir>' runs as a long-lived daemon, fsnotifying
+# the listed directories and ingesting new/changed files via a SQLite-
+# backed crash-resumable queue. Empty 'dirs' means "no auto-watch on
+# bare invocation"; pass <dir> as an arg or fill this list to opt in.
+# Debounce coalesces rapid writes (editors saving in chunks); max_attempts
+# caps retries with 5s/30s/5min exponential backoff before status='failed'.
+dirs = []
+debounce_seconds = 2
+max_attempts = 3
 `
 
 const defaultConfigOllamaToml = `[llm]
@@ -126,6 +148,17 @@ update_existing = true
 feed_request_per_second = 1.0
 feed_max_entries = 50
 sitemap_max_pages = 200
+
+[watch]
+# v0.8: 'llmwiki watch <dir>' runs as a long-lived daemon, fsnotifying
+# the listed directories and ingesting new/changed files via a SQLite-
+# backed crash-resumable queue. Empty 'dirs' means "no auto-watch on
+# bare invocation"; pass <dir> as an arg or fill this list to opt in.
+# Debounce coalesces rapid writes (editors saving in chunks); max_attempts
+# caps retries with 5s/30s/5min exponential backoff before status='failed'.
+dirs = []
+debounce_seconds = 2
+max_attempts = 3
 `
 
 // defaultConfigOpenAICompatToml seeds the openai-compatible provider with a
@@ -160,6 +193,17 @@ update_existing = true
 feed_request_per_second = 1.0
 feed_max_entries = 50
 sitemap_max_pages = 200
+
+[watch]
+# v0.8: 'llmwiki watch <dir>' runs as a long-lived daemon, fsnotifying
+# the listed directories and ingesting new/changed files via a SQLite-
+# backed crash-resumable queue. Empty 'dirs' means "no auto-watch on
+# bare invocation"; pass <dir> as an arg or fill this list to opt in.
+# Debounce coalesces rapid writes (editors saving in chunks); max_attempts
+# caps retries with 5s/30s/5min exponential backoff before status='failed'.
+dirs = []
+debounce_seconds = 2
+max_attempts = 3
 
 [providers.openai_compat]
 # base_url options:
